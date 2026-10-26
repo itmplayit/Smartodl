@@ -1,0 +1,38 @@
+{
+  "name": "smartodl-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SmartODL production API",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "env:check": "node config/validate-env.js",
+    "migrate": "node scripts/migrate.js",
+    "test": "node --test test/unit/",
+    "owner:bootstrap": "node scripts/bootstrap-owner.js",
+    "test:ai": "node test/ai-code-bench.js && node test/ai-fusion-bench.js",
+    "test:ai:all": "node test/ai-code-bench.js --all"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "bcryptjs": "^2.4.3",
+    "compression": "^1.7.4",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
+    "ioredis": "^5.11.1",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "multer": "^2.0.2",
+    "mysql2": "^3.11.4",
+    "nodemailer": "^10.0.11",
+    "passport": "^0.7.0",
+    "passport-github2": "^0.1.12",
+    "passport-google-oauth20": "^2.0.0",
+    "rate-limit-redis": "^4.3.1"
+  }
+}

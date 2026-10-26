@@ -1,0 +1,17 @@
+.git
+.git/**
+**/node_modules
+**/.env
+**/.env.*
+!**/.env.example
+frontend/dist
+backend/uploads/*
+!backend/uploads/.gitkeep
+coverage
+*.log
+*.backup
+*.bak
+.DS_Store
+Thumbs.db
+.vscode
+.idea

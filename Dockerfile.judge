@@ -1,0 +1,73 @@
+# SmartODL local-sandbox judge worker.
+#
+# The previous Nixpacks deployment only installed Node dependencies. That
+# meant a cloud worker could boot while gcc, g++, Java, Python, prlimit,
+# unshare, sudo and the MariaDB client were all absent. This image makes the
+# complete runtime contract explicit and fails at build/boot time instead of
+# reporting false health.
+#
+# Sudoers policy (hardened): the worker may NOT call unshare/chown/rm freely as
+# root — a wildcard like `NOPASSWD: /usr/bin/unshare` is an arbitrary root
+# command (sudo -n unshare -- /bin/sh). Instead it may run exactly two
+# root-owned wrapper programs that validate every argument and confine their
+# effect to /tmp/smartodl-judge/run-* (see backend/judge-service/sandbox/).
+FROM node:20-bookworm-slim
+
+ENV NODE_ENV=production \
+    JUDGE_HOST=0.0.0.0 \
+    JUDGE_RUN_AS=judgerun \
+    JUDGE_WORKDIR=/tmp/smartodl-judge \
+    JUDGE_SANDBOX_WRAPPERS=1
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      default-jdk-headless \
+      mariadb-client \
+      procps \
+      python3 \
+      sudo \
+      util-linux \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system judgeweb \
+ && useradd --system --gid judgeweb --home-dir /nonexistent --shell /usr/sbin/nologin judgeweb \
+ && groupadd --system judgerun \
+ && useradd --system --gid judgerun --home-dir /nonexistent --shell /usr/sbin/nologin judgerun \
+ && printf '%s\n' \
+      'Defaults:judgeweb !requiretty' \
+      'judgeweb ALL=(root) NOPASSWD: /usr/local/sbin/sodl-exec, /usr/local/sbin/sodl-clean' \
+      > /etc/sudoers.d/smartodl-judge \
+ && chmod 0440 /etc/sudoers.d/smartodl-judge \
+ && visudo -cf /etc/sudoers.d/smartodl-judge \
+ && install -d -m 0711 -o judgeweb -g judgeweb /tmp/smartodl-judge
+
+WORKDIR /app/backend/judge-service
+
+COPY backend/judge-service/package*.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+
+COPY backend/judge-service/ ./
+
+# The sandbox wrappers: root-owned, world-readable, NOT writable by anyone.
+# /etc/smartodl-judge.conf is the only place their paths/users are tuned,
+# and it is root-owned too (sudo strips the environment on purpose).
+RUN install -m 0755 -o root -g root sandbox/sodl-exec.sh /usr/local/sbin/sodl-exec \
+ && install -m 0755 -o root -g root sandbox/sodl-clean.sh /usr/local/sbin/sodl-clean \
+ && printf '%s\n' \
+      'ROOT="/tmp/smartodl-judge"' \
+      'WEB_USER="judgeweb"' \
+      'RUN_USER="judgerun"' \
+      > /etc/smartodl-judge.conf \
+ && chmod 0644 /etc/smartodl-judge.conf \
+ && sh -n /usr/local/sbin/sodl-exec && sh -n /usr/local/sbin/sodl-clean
+
+RUN chown -R judgeweb:judgeweb /app
+
+USER judgeweb
+EXPOSE 2358
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD-SHELL node -e "fetch('http://127.0.0.1:'+(process.env.PORT||2358)+'/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+
+CMD ["node", "judge.js"]

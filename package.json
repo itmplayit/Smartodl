@@ -1,0 +1,13 @@
+{
+  "name": "smartodl",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SmartODL repository root — convenience scripts to install and build all services (frontend, backend, judge).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "install:all": "cd frontend && npm ci && cd ../backend && npm ci && cd judge-service && npm ci",
+    "build": "cd frontend && npm run build"
+  }
+}

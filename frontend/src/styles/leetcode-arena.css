@@ -1,0 +1,883 @@
+/* ============================================================================
+   Coding Arena / in-quiz compiler — LeetCode layout on SmartODL's palette
+   ----------------------------------------------------------------------------
+   The STRUCTURE is LeetCode's (two-pane split, tab strip, rounded panels,
+   rounded-full difficulty pills, editor + console stack). The COLOURS are the
+   website's: every surface derives from the theme variables styles.css
+   defines, so the arena matches the rest of SmartODL and follows the
+   light/dark toggle with no separate override block.
+
+     dark   bg #07111b · panel #102130 · panel-2 #142838
+            border #294454 · border-soft #203947 · text #e7f1f6 · heading #fff
+            accent #ffc43d · green #2bc48a · amber #ffc15a · red #ff7a83
+     light  bg #f5f8fa · panel #ffffff · border #d8e3e9 · text #18303e
+            accent #f5a800 · green #087a55 · amber #b86d00 · red #b4232d
+
+   Two scopes:
+     .lc-full   the full-viewport arena page (adds the split-pane layout)
+     .lc-skin   a reusable island — used by the compiler inside a quiz
+   ========================================================================== */
+
+/* The --lc-* tokens are plain semantic aliases of the site palette, so they
+ * live on :root. They have to: the exam paper and the question pane sit
+ * OUTSIDE .lc-skin (the skin class is on the compiler, which is a descendant),
+ * and CSS variables only inherit downwards — scoping them to .lc-skin left
+ * those ancestors with no value at all. Namespaced, so nothing collides. */
+:root {
+  --lc-page: var(--bg);
+  --lc-layer-01: var(--panel);
+  --lc-layer-02: var(--panel-2);
+  --lc-layer-03: var(--panel-2);
+
+  --lc-text-primary: var(--heading);
+  --lc-text-secondary: var(--text);
+  --lc-text-tertiary: var(--muted);
+  --lc-text-quaternary: var(--muted);
+
+  --lc-border: var(--border-soft);
+  --lc-border-strong: var(--border);
+
+  --lc-fill-q: var(--white-03);
+  --lc-fill-t: var(--white-04);
+  --lc-fill-s: var(--white-06);
+
+  /* difficulty + verdict colours reuse the site's semantic palette, which is
+     also what difficultyClass() maps to elsewhere in the app */
+  --lc-easy: var(--green);
+  --lc-medium: var(--amber);
+  --lc-hard: var(--red);
+  --lc-green: var(--green);
+  --lc-orange: var(--accent);
+
+  --lc-editor-bg: var(--code-editor);
+}
+
+.lc-full,
+.lc-skin {
+  /* aliases a few base-sheet rules expect; kept scoped so the rest of the
+     site is untouched */
+  --soft: var(--white-03);
+  --line: var(--border-soft);
+
+  /* the site uses softer corners than LeetCode's 8px */
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  background: var(--lc-page);
+  color: var(--text);
+  padding: 8px;
+  gap: 8px;
+}
+
+/* the skin island inside a quiz must not paint the page background over the
+   exam paper — only its own component surfaces */
+.lc-skin { background: transparent; }
+
+/* ---------------------------------------------------------------- panels -- */
+.lc-full .arena { gap: 8px; }
+
+.lc-full .arena-left,
+.lc-full .arena-right {
+  background: var(--lc-layer-01);
+  border: 1px solid var(--lc-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+/* the base sheet flattens these in full mode — restore the card look */
+.lc-full .arena-left { border-right: 1px solid var(--lc-border); }
+
+/* ------------------------------------------------------------ top strip -- */
+.lc-full .lc-top {
+  background: var(--lc-layer-01);
+  border: 1px solid var(--lc-border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 0;
+}
+.lc-full .lc-top h1 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--lc-text-primary);
+  letter-spacing: 0;
+}
+/* centred Run / Submit cluster, as on LeetCode's problem bar */
+.lc-full .lc-actions { display: flex; gap: 8px; align-items: center; }
+.lc-full .lc-run,
+.lc-skin .lc-run {
+  background: var(--lc-fill-q);
+  color: var(--lc-text-secondary);
+  border: none; border-radius: 6px; font-weight: 500; font-size: .8125rem;
+}
+.lc-full .lc-run:hover:not(:disabled),
+.lc-skin .lc-run:hover:not(:disabled) { background: var(--lc-fill-t); color: var(--lc-text-primary); }
+
+/* ---- in-pane problem title + meta pills (LeetCode layout) -------------- */
+.lc-full .lc-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -.01em;
+  color: var(--lc-text-primary);
+  margin: 0 0 14px;
+}
+.lc-full .lc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 22px;
+}
+.lc-full .lc-chip,
+.lc-skin .lc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  background: var(--lc-fill-s);
+  color: var(--lc-text-tertiary);
+  padding: 4px 10px;
+  font-size: .75rem;
+  font-weight: 500;
+  line-height: 1;
+}
+.lc-full .lc-chip-solved,
+.lc-skin .lc-chip-solved { color: var(--lc-green); }
+
+/* ---------------------------------------------------------------- tabs ---- */
+.lc-full .lc-tabs {
+  background: var(--lc-layer-01);
+  border-bottom: 1px solid var(--lc-border);
+  padding: 0 8px;
+  gap: 0;
+  align-items: center;
+  min-height: 45px;
+  flex: none;
+}
+.lc-full .lc-tab {
+  position: relative;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--lc-text-quaternary);
+  font-size: .875rem;
+  font-weight: 500;
+  padding: 7px 12px;
+  margin: 0 1px;
+  cursor: pointer;
+  transition: color .15s ease, background-color .15s ease;
+}
+.lc-full .lc-tab:hover { color: var(--lc-text-secondary); background: var(--lc-fill-q); }
+.lc-full .lc-tab.active {
+  color: var(--lc-text-primary);
+  font-weight: 500;
+  background: transparent;
+  border-bottom: 2px solid transparent;
+}
+/* LeetCode marks the active tab with the text colour, not a heavy underline */
+.lc-full .lc-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 12px; right: 12px; bottom: -1px;
+  height: 2px;
+  background: var(--lc-text-primary);
+  border-radius: 2px 2px 0 0;
+}
+.lc-full .lc-tab-icon {
+  color: var(--lc-text-quaternary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 7px 10px;
+  border-radius: 6px;
+}
+.lc-full .lc-tab-icon:hover { color: var(--lc-text-primary); background: var(--lc-fill-q); }
+
+/* -------------------------------------------------------------- content -- */
+.lc-full .arena-scroll { padding: 20px 24px; }
+
+.lc-full .lc-doc {
+  color: var(--lc-text-secondary);
+  font-size: .875rem;
+  line-height: 1.6;
+}
+.lc-full .arena-scroll h3 {
+  color: var(--lc-text-primary);
+  font-size: .95rem;
+  font-weight: 600;
+  margin: 20px 0 8px;
+}
+.lc-full .arena-scroll h4 {
+  color: var(--lc-text-primary);
+  font-size: .875rem;
+  font-weight: 600;
+  margin: 16px 0 6px;
+}
+.lc-full .lc-list { color: var(--lc-text-secondary); font-size: .875rem; padding-left: 20px; }
+.lc-full .lc-list li { margin: 4px 0; }
+
+/* inline code chips — LeetCode uses a soft fill pill */
+.lc-full .lc-code-inline,
+.lc-skin .lc-code-inline {
+  background: var(--lc-fill-s);
+  border: none;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: .8125rem;
+  color: var(--lc-text-primary);
+}
+
+/* example blocks — thick muted left rule, no card */
+.lc-full .lc-example {
+  border-left: 3px solid var(--lc-border-strong);
+  background: transparent;
+  padding: 2px 0 2px 16px;
+  margin: 10px 0 18px;
+  font-size: .875rem;
+  color: var(--lc-text-secondary);
+  gap: 4px;
+}
+.lc-full .lc-example strong { color: var(--lc-text-primary); font-weight: 600; }
+
+.lc-full .code-block,
+.lc-skin .code-block {
+  background: var(--lc-fill-q);
+  border: 1px solid var(--lc-border);
+  border-radius: 6px;
+  color: var(--lc-text-secondary);
+  font-size: .8125rem;
+  padding: 10px 12px;
+}
+
+/* difficulty / meta pills — rounded-full, tinted fill, coloured text */
+.lc-full .tag,
+.lc-skin .tag,
+.lc-full .badge,
+.lc-skin .badge {
+  border-radius: 999px;
+  background: var(--lc-fill-s);
+  border: none;
+  color: var(--lc-text-tertiary);
+  font-size: .75rem;
+  font-weight: 500;
+  padding: 4px 10px;
+}
+.lc-full .badge.green,
+.lc-skin .badge.green { background: var(--lc-fill-s); color: var(--lc-green); }
+.lc-full .badge.amber,
+.lc-skin .badge.amber { background: var(--lc-fill-s); color: var(--lc-medium); }
+.lc-full .badge.red,
+.lc-skin .badge.red { background: var(--lc-fill-s); color: var(--lc-hard); }
+
+/* difficulty pill — matches LeetCode's
+   "inline-flex px-2 py-1 rounded-full bg-fill-secondary text-difficulty-*" */
+.lc-full .lc-diff {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: var(--lc-fill-s);
+  padding: 4px 10px;
+  font-size: .75rem;
+  font-weight: 500;
+  line-height: 1;
+}
+.lc-full .lc-diff-easy,
+.lc-skin .lc-diff-easy { color: var(--lc-easy); }
+.lc-full .lc-diff-medium,
+.lc-skin .lc-diff-medium { color: var(--lc-medium); }
+.lc-full .lc-diff-hard,
+.lc-skin .lc-diff-hard { color: var(--lc-hard); }
+
+/* ------------------------------------------------------- code panel head -- */
+.lc-full .lc-code-head {
+  background: var(--lc-layer-01);
+  border-bottom: 1px solid var(--lc-border);
+  padding: 0 12px;
+  min-height: 45px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.lc-full .lc-code-head .title {
+  color: var(--lc-text-primary);
+  font-size: .875rem;
+  font-weight: 500;
+}
+/* LeetCode tints the </> glyph green */
+.lc-full .lc-code-head .title .lc-glyph { color: var(--lc-green); font-family: var(--mono); }
+
+/* ------------------------------------------------------------- editor ----- */
+.lc-full .editor-wrap,
+.lc-skin .editor-wrap {
+  background: var(--lc-editor-bg);
+  border: none;
+  border-radius: 0;
+}
+.lc-full .editor-bar,
+.lc-skin .editor-bar {
+  background: var(--lc-layer-01);
+  border-bottom: 1px solid var(--lc-border);
+  padding: 6px 12px;
+  gap: 8px;
+  min-height: 40px;
+}
+/* Language picker.
+ * The institutional layer in styles.css gives every .select a hardcoded #b8cbd5 border, which
+ * reads as a pale outline on the dark editor bar. Here the control takes a
+ * solid surface and border from the theme tokens instead, so it sits on the
+ * bar in both themes. The native dropdown that opens is painted by the
+ * browser, so the option list is given the same surface and `color-scheme`
+ * keeps the scrollbar and highlight dark too. */
+.lc-full .editor-bar .select,
+.lc-skin .editor-bar .select {
+  background: var(--lc-layer-02);
+  border: 1px solid var(--lc-border);
+  border-radius: 6px;
+  color: var(--lc-text-primary);
+  font-size: .8125rem;
+  font-weight: 500;
+  color-scheme: inherit;
+  cursor: pointer;
+}
+.lc-full .editor-bar .select:hover,
+.lc-skin .editor-bar .select:hover {
+  border-color: var(--lc-border-strong);
+}
+.lc-full .editor-bar .select:focus-visible,
+.lc-skin .editor-bar .select:focus-visible {
+  outline: none;
+  border-color: var(--lc-orange);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lc-orange) 30%, transparent);
+}
+/* the opened list */
+.lc-full .editor-bar .select option,
+.lc-skin .editor-bar .select option {
+  background: var(--lc-layer-01);
+  color: var(--lc-text-primary);
+}
+.lc-full .editor-bar .select:hover,
+.lc-skin .editor-bar .select:hover { background: var(--lc-fill-t); }
+.lc-full .editor-monaco,
+.lc-skin .editor-monaco { background: var(--lc-editor-bg); }
+.lc-full .editor-status,
+.lc-skin .editor-status {
+  background: var(--lc-layer-01);
+  border-top: 1px solid var(--lc-border);
+  color: var(--lc-text-quaternary);
+  font-size: .75rem;
+  padding: 6px 12px;
+}
+
+/* ------------------------------------------------------------- console ---- */
+.lc-full .lc-bottom {
+  background: var(--lc-layer-01);
+  border-top: 1px solid var(--lc-border);
+}
+.lc-full .lc-body { padding: 16px; }
+.lc-full .lc-empty { color: var(--lc-text-quaternary); font-size: .875rem; }
+
+/* --------------------------------------------------------------- splitter - */
+.lc-full .lc-divider,
+.lc-full .lc-divider-h { background: transparent; transition: background .15s ease; }
+.lc-full .lc-divider:hover { background: var(--lc-orange); }
+.lc-full .lc-divider-h:hover { background: var(--lc-orange); }
+
+/* ---------------------------------------------------------------- footer -- */
+.lc-full .lc-left-foot {
+  background: var(--lc-layer-01);
+  border-top: 1px solid var(--lc-border);
+  color: var(--lc-text-quaternary);
+  font-size: .8125rem;
+  padding: 8px 14px;
+}
+.lc-full .lc-foot-action {
+  color: var(--lc-text-quaternary);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.lc-full .lc-foot-action:hover { color: var(--lc-text-primary); background: var(--lc-fill-q); }
+.lc-full .online { color: var(--lc-green); font-size: .75rem; }
+
+/* ---------------------------------------------------------------- buttons - */
+.lc-full .btn-ghost,
+.lc-skin .btn-ghost {
+  background: var(--lc-fill-q);
+  border: 1px solid transparent;
+  color: var(--lc-text-secondary);
+  border-radius: 6px;
+  font-size: .8125rem;
+}
+.lc-full .btn-ghost:hover,
+.lc-skin .btn-ghost:hover { background: var(--lc-fill-t); color: var(--lc-text-primary); }
+/* the green Submit, as on LeetCode */
+.lc-full .lc-submit,
+.lc-skin .lc-submit {
+  background: var(--lc-fill-q);
+  color: var(--lc-green);
+  border: none;
+  border-radius: 6px;
+  font-weight: 500;
+  font-size: .8125rem;
+}
+.lc-full .lc-submit:hover:not(:disabled),
+.lc-skin .lc-submit:hover:not(:disabled) { background: var(--lc-fill-t); }
+
+/* scrollbars, LeetCode-style thin overlay */
+.lc-full .arena-scroll::-webkit-scrollbar,
+.lc-full .lc-body::-webkit-scrollbar { width: 8px; height: 8px; }
+.lc-full .arena-scroll::-webkit-scrollbar-thumb,
+.lc-full .lc-body::-webkit-scrollbar-thumb {
+  background: var(--lc-fill-s);
+  border-radius: 4px;
+}
+.lc-full .arena-scroll::-webkit-scrollbar-thumb:hover,
+.lc-full .lc-body::-webkit-scrollbar-thumb:hover { background: var(--lc-border-strong); }
+.lc-full .arena-scroll::-webkit-scrollbar-track,
+.lc-full .lc-body::-webkit-scrollbar-track { background: transparent; }
+
+/* ==========================================================================
+   Immersive arena chrome
+   The problem page takes the entire viewport: the utility strip, institution
+   header, announcement ribbon, main nav and site footer are all hidden while
+   ProblemDetail is mounted (body.arena-immersive) and restored on unmount, so
+   every other page keeps its institutional chrome untouched.
+   Navigation stays reachable through the "← Arena" link in the problem bar.
+   ========================================================================== */
+body.arena-immersive .public-utility,
+body.arena-immersive .institution-header,
+body.arena-immersive .institution-notice,
+body.arena-immersive .institution-nav,
+body.arena-immersive .institution-footer { display: none !important; }
+
+/* Only the arena is a fixed-height shell that scrolls internally; quiz pages
+   are ordinary documents and must keep their page scroll. The LeetCode page
+   colour lives on .lc-full (which covers the viewport) rather than on <body>,
+   so pages that merely hide the chrome keep their own background. */
+body.arena-noscroll { overflow: hidden; }
+
+/* the page shell must not add its own spacing once the chrome is gone */
+body.arena-immersive #main-content { margin: 0; padding: 0; }
+
+/* with no header or footer the arena owns the full viewport */
+body.arena-immersive .lc-full { height: 100vh; min-height: 100vh; }
+
+/* quiz pages keep their normal flow — just reclaim the space the hidden
+   chrome was occupying */
+body.arena-immersive #main-content > .container.section { padding-top: 22px; }
+
+/* the admin copy-paste notice: keep it, but as a quiet inline chip */
+.lc-full .gate-pill.pending,
+.lc-skin .gate-pill.pending {
+  background: var(--lc-fill-q);
+  border: 1px solid var(--lc-border);
+  color: var(--lc-medium);
+  border-radius: 6px;
+  font-size: .75rem;
+  padding: 4px 10px;
+  margin: 6px 12px 0 !important;
+}
+
+/* ==========================================================================
+   In-quiz compiler (QuizAttempt -> CodingAnswer, wrapped in .lc-skin)
+   The arena's split-pane layout does not apply here — this is a card embedded
+   in a scrolling quiz page — but the editor surface, run strip and verdict box
+   use the same LeetCode tokens so the two compilers feel identical.
+   ========================================================================== */
+.lc-skin .code-panel {
+  background: var(--lc-layer-01);
+  border: 1px solid var(--lc-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+/* the editor fills the card; the bar and status keep their own surfaces */
+.lc-skin .code-panel .editor-wrap { border: none; border-radius: 0; }
+.lc-skin .code-panel .editor-monaco { background: var(--lc-editor-bg); }
+
+/* run strip under the editor */
+.lc-skin .run-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--lc-layer-01);
+  border-top: 1px solid var(--lc-border);
+  color: var(--lc-text-quaternary);
+  font-size: .78rem;
+  padding: 8px 12px;
+}
+.lc-skin .run-count strong { color: var(--lc-text-primary); font-weight: 600; }
+
+/* state pills — tinted fill + coloured text, like LeetCode's status chips */
+.lc-skin .gate-pill {
+  border-radius: 999px;
+  border: none;
+  background: var(--lc-fill-s);
+  font-size: .72rem;
+  font-weight: 500;
+  padding: 4px 10px;
+  line-height: 1;
+}
+.lc-skin .gate-pill.ok      { color: var(--lc-green); }
+.lc-skin .gate-pill.bad     { color: var(--lc-hard); }
+.lc-skin .gate-pill.pending { color: var(--lc-medium); }
+
+/* verdict box mirrors the arena's Accepted / failed banner */
+.lc-skin .verdict-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-top: 12px;
+  background: var(--lc-fill-q);
+  border: 1px solid var(--lc-border);
+}
+.lc-skin .verdict-box .big { font-size: 1.05rem; font-weight: 600; }
+.lc-skin .verdict-box.ok   { border-color: rgba(40, 194, 68, .35); background: rgba(40, 194, 68, .08); }
+.lc-skin .verdict-box.ok   .big { color: var(--lc-green); }
+.lc-skin .verdict-box.bad  { border-color: rgba(248, 97, 92, .35); background: rgba(248, 97, 92, .08); }
+.lc-skin .verdict-box.bad  .big { color: var(--lc-hard); }
+.lc-skin .verdict-box.warn { border-color: rgba(250, 195, 29, .35); background: rgba(250, 195, 29, .08); }
+.lc-skin .verdict-box.warn .big { color: var(--lc-medium); }
+
+/* compiler output */
+.lc-skin .code-block.err { border-color: rgba(248, 97, 92, .35); color: var(--lc-hard); }
+
+/* the quiz sits on the app background, so the skin island must not inherit
+   the arena's page colour — only its component surfaces */
+.lc-skin { background: transparent; color: inherit; }
+
+/* test-case cards under the in-quiz compiler */
+.lc-skin .case-card {
+  background: var(--lc-fill-q);
+  border: 1px solid var(--lc-border);
+  border-radius: 8px;
+  font-size: .8rem;
+}
+.lc-skin .case-card.pending { border-style: solid; }
+.lc-skin .case-card.ok  { border-color: rgba(40, 194, 68, .35); background: rgba(40, 194, 68, .07); }
+.lc-skin .case-card.bad { border-color: rgba(248, 97, 92, .35); background: rgba(248, 97, 92, .07); }
+.lc-skin .case-card .case-head strong { color: var(--lc-text-primary); }
+.lc-skin .case-line { color: var(--lc-text-quaternary); }
+.lc-skin .case-line b { color: var(--lc-text-secondary); }
+/* the io boxes hardcode a navy in the base sheet — re-point them */
+.lc-skin .case-card .io {
+  background: var(--lc-editor-bg);
+  border: 1px solid var(--lc-border);
+  border-radius: 6px;
+  color: var(--lc-text-secondary);
+}
+.lc-skin .case-editor {
+  background: var(--lc-fill-q);
+  border: 1px solid var(--lc-border);
+  border-radius: 8px;
+}
+
+/* "Run code" is the primary action here — give it LeetCode's green, matching
+   the arena's Submit button instead of the app's blue brand fill */
+.lc-skin .btn-primary {
+  background: var(--lc-fill-q);
+  color: var(--lc-green);
+  border: none;
+  border-radius: 6px;
+  font-weight: 500;
+  font-size: .8125rem;
+}
+.lc-skin .btn-primary:hover:not(:disabled) { background: var(--lc-fill-t); }
+.lc-skin .btn-primary:disabled { color: var(--lc-text-quaternary); }
+
+/* quiz notices inside the skin */
+.lc-skin .notice {
+  background: var(--lc-fill-q);
+  border: 1px solid var(--lc-border);
+  border-radius: 8px;
+  color: var(--lc-text-tertiary);
+}
+
+/* ==========================================================================
+   Coding question inside a quiz — Coding Arena two-pane layout
+   Question on the left, compiler on the right, exactly like /coding/:slug.
+   The quiz keeps its own exam chrome (progress bar, navigator, paper head);
+   only the answer area adopts the arena split.
+   ========================================================================== */
+
+/* lift the 1200px reading cap — two panes plus the navigator need the width */
+.exam-wrap.qz-wide { max-width: 1760px; }
+
+/* The exam paper wraps the split. Left as-is it is a navy gradient card with a
+   coloured top rule, which clashes with the grey LeetCode panes inside it — so
+   on coding questions the paper becomes a neutral LeetCode surface too. */
+.qz-wide .exam-paper {
+  background: var(--lc-layer-01);
+  border: 1px solid var(--lc-border);
+  border-radius: 8px;
+  box-shadow: none;
+  padding: 14px 16px 12px;
+}
+.qz-wide .exam-paper::before { display: none; }   /* the gradient top rule */
+.qz-wide .paper-head {
+  border-bottom: 1px solid var(--lc-border);
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+}
+.qz-wide .paper-foot {
+  border-top: 1px solid var(--lc-border);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.qz-wide .q-number .num {
+  width: 34px; height: 34px;
+  font-family: var(--sans);
+  font-size: .95rem;
+  color: var(--lc-text-primary);
+  background: var(--lc-fill-s);
+  border: none;
+}
+.qz-wide .q-number .meta { color: var(--lc-text-quaternary); }
+
+/* the panes sit directly on the paper — give them a subtle inner surface */
+.qz-wide .qz-arena-left { background: var(--lc-fill-q); }
+
+.qz-arena {
+  display: grid;
+  /* columns are set inline by the splitter: `${pct}fr 6px ${100-pct}fr` */
+  gap: 0;
+  align-items: stretch;
+  /* fixed height so the editor can flex instead of the page growing */
+  height: calc(100vh - 300px);
+  min-height: 480px;
+  margin-top: 4px;
+}
+
+.qz-arena-left,
+.qz-arena-right {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* --- left: the question ------------------------------------------------- */
+.qz-arena-left {
+  background: var(--lc-layer-01);
+  border: 1px solid var(--lc-border);
+  border-radius: 8px;
+  padding: 18px 20px;
+  overflow: auto;
+}
+.qz-arena-left .q-text {
+  font-size: .95rem;
+  line-height: 1.65;
+  font-weight: 400;
+  color: var(--lc-text-secondary);
+  margin: 0 0 12px;
+}
+.qz-arena-left .code-block {
+  background: var(--lc-editor-bg);
+  border: 1px solid var(--lc-border);
+  border-radius: 6px;
+  font-size: .8125rem;
+}
+
+/* --- right: the compiler ------------------------------------------------ */
+.qz-compiler {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 0;
+  /* Clip. The results console sits last in this column and, once a run
+     produced a verdict box plus a grid of test-case cards, it grew past the
+     fixed-height arena and painted over the question paper's footer — the
+     "Clear answer" / "Save & Next" buttons ended up on top of Case 2. */
+  overflow: hidden;
+}
+.qz-compiler-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex: none;
+  padding: 0 2px 8px;
+}
+/* the panel owns the remaining height; the editor flexes inside it */
+.qz-compiler .code-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  /* was 320px: with the console open the column needed 66+320+190 = 576px
+     inside a 564px arena, so the console was pushed out of the bottom. The
+     editor stays comfortable but can now yield when results are showing. */
+  min-height: 150px;
+}
+.qz-compiler .code-panel .editor-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.qz-compiler .code-panel .editor-monaco {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+}
+.qz-compiler .editor-bar,
+.qz-compiler .editor-status,
+.qz-compiler .run-strip { flex: none; }
+
+/* results console under the editor — scrolls on its own, like the arena */
+/* Cap the results area with a fixed height rather than a percentage: the
+   verdict box plus the test-case grid is tall, and a percentage let it squeeze
+   the editor down to ~220px. A fixed cap keeps the editor dominant and lets
+   the results scroll instead. */
+/* The results pane is resizable: its height comes from the drag handle above
+   it, so there must be no max-height here — an earlier cap silently pinned it
+   at 190px and the handle appeared to do nothing. */
+.qz-console {
+  /* shrink-able (0 1 auto, not 0 0 auto): the drag handle sets an explicit
+     height, and on a short viewport that height must be allowed to give way
+     instead of overflowing the pane. */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+  /* never taller than the pane, whatever the handle was dragged to */
+  max-height: 100%;
+}
+.qz-console:empty { display: none; }
+/* ---- compact results, so a verdict + a real test case fit in the pane ----
+   The quiz console is a fraction of the arena's height. At the default size
+   the full-size verdict box alone filled it and every case card was sliced in
+   half, which read as a broken layout rather than a scrollable one. */
+.qz-console .case-grid {
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  margin-top: 8px;
+  gap: 8px;
+}
+.qz-console .verdict-box {
+  padding: 8px 12px;
+  gap: 10px;
+  align-items: center;
+}
+.qz-console .verdict-box > span:first-child { font-size: 1.05rem !important; }
+.qz-console .verdict-box .big { font-size: .95rem; line-height: 1.25; }
+.qz-console .verdict-box .small { font-size: .75rem; }
+.qz-console .case-card { padding: 8px 10px; font-size: .75rem; }
+.qz-console .case-card .case-head { margin-bottom: 4px; }
+/* each I/O box scrolls on its own instead of stretching the whole card */
+.qz-console .case-card .io {
+  max-height: 58px;
+  overflow: auto;
+  padding: 4px 6px;
+  font-size: .72rem;
+  line-height: 1.35;
+}
+.qz-console .case-line { margin-top: 4px; }
+.qz-console h4 { font-size: .8rem; margin: 8px 0 4px; }
+.qz-console .code-block { font-size: .72rem; max-height: 120px; overflow: auto; }
+
+/* a hint that there is more below, so a clipped grid reads as scrollable */
+.qz-console { scrollbar-gutter: stable; }
+.qz-console::-webkit-scrollbar { width: 8px; }
+.qz-console::-webkit-scrollbar-thumb {
+  background: var(--lc-fill-s);
+  border-radius: 4px;
+}
+.qz-console::-webkit-scrollbar-track { background: transparent; }
+
+/* stack the panes on narrow screens */
+@media (max-width: 1100px) {
+  /* !important: the splitter writes grid-template-columns as an INLINE style,
+     which otherwise beats this rule and left two cramped columns on a phone
+     or a narrow window instead of stacking them. */
+  .qz-arena {
+    grid-template-columns: 1fr !important;
+    height: auto;
+    min-height: 0;
+    gap: 12px;
+  }
+  .qz-arena-left { max-height: 320px; }
+  .qz-compiler { overflow: visible; }      /* stacked: the page scrolls, not the pane */
+  .qz-compiler .code-panel { min-height: 420px; }
+  .qz-console { overflow: visible; height: auto !important; max-height: none; }
+}
+
+/* worked examples in the question pane (LeetCode's "Example 1:" blocks) */
+.qz-arena-left .qz-example { margin-top: 16px; }
+.qz-arena-left .qz-example h4 {
+  font-size: .875rem;
+  font-weight: 600;
+  color: var(--lc-text-primary);
+  margin: 0 0 6px;
+}
+.qz-arena-left .lc-example {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-left: 3px solid var(--lc-border-strong);
+  padding: 2px 0 2px 14px;
+  margin: 0;
+  font-size: .85rem;
+  color: var(--lc-text-secondary);
+}
+.qz-arena-left .lc-example strong { color: var(--lc-text-primary); font-weight: 600; }
+.qz-arena-left .lc-code-inline {
+  background: var(--lc-fill-s);
+  border: none;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: var(--mono);
+  font-size: .8rem;
+  color: var(--lc-text-primary);
+}
+
+
+/* ---- split handles in the quiz compiler ------------------------------- */
+/* A 6px bar is hard to grab, so both handles paint a thin line but expose a
+   wider invisible hit area through a ::before overlay. */
+.qz-divider,
+.qz-divider-h {
+  position: relative;
+  background: transparent;
+  transition: background .15s ease;
+  border-radius: 3px;
+}
+.qz-divider { cursor: col-resize; width: 6px; align-self: stretch; }
+.qz-divider-h { cursor: row-resize; height: 6px; flex: none; margin: 4px 0; }
+
+.qz-divider::before,
+.qz-divider-h::before {
+  content: '';
+  position: absolute;
+  /* widen the grab zone without moving the visible line */
+  inset: 0 -4px;
+}
+.qz-divider-h::before { inset: -4px 0; }
+
+.qz-divider:hover,
+.qz-divider-h:hover { background: var(--lc-orange); }
+
+/* a subtle grip so the handle is discoverable before hover */
+.qz-divider::after,
+.qz-divider-h::after {
+  content: '';
+  position: absolute;
+  background: var(--lc-border-strong);
+  border-radius: 2px;
+  opacity: .5;
+}
+.qz-divider::after { top: 50%; left: 2px; width: 2px; height: 26px; transform: translateY(-50%); }
+.qz-divider-h::after { left: 50%; top: 2px; height: 2px; width: 26px; transform: translateX(-50%); }
+.qz-divider:hover::after,
+.qz-divider-h:hover::after { opacity: 0; }
+
+/* stacked layout: the handles make no sense in one column */
+@media (max-width: 1100px) {
+  .qz-divider, .qz-divider-h { display: none; }
+  .qz-console { height: auto !important; max-height: none; overflow: visible; }
+}

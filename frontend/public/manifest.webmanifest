@@ -1,0 +1,21 @@
+{
+  "name": "SmartODL — Learn. Practice. Compete.",
+  "short_name": "SmartODL",
+  "description": "Structured courses, notes, quizzes, coding practice and contests for college students.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f5f8fa",
+  "theme_color": "#01507c",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Coding Arena", "url": "/coding" },
+    { "name": "Quizzes", "url": "/quizzes" },
+    { "name": "Leaderboard", "url": "/leaderboard" }
+  ]
+}

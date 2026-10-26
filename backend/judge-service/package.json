@@ -1,0 +1,9 @@
+{
+  "name": "smartodl-judge-service",
+  "version": "1.0.0",
+  "description": "Isolated sandboxed code execution worker (never runs inside the API process)",
+  "type": "commonjs",
+  "main": "judge.js",
+  "scripts": { "start": "node --env-file=.env judge.js", "check": "node --check judge.js && node --check lib/platform.js" },
+  "dependencies": { "express": "^4.21.1" }
+}

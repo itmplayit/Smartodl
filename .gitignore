@@ -1,0 +1,27 @@
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Dependencies and generated output
+node_modules/
+dist/
+build/
+coverage/
+.vite/
+*.log
+*.backup
+*.bak
+
+# Runtime data
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Editors / operating systems
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

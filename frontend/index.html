@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <meta name="theme-color" content="#01507c" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="SmartODL — structured courses, study notes, live quizzes, coding practice and contests for college students." />
+    <title>SmartODL — Learn. Practice. Compete.</title>
+    <script>
+      // Apply the saved theme BEFORE React hydrates — otherwise light-mode users
+      // see a dark flash on every page load (ThemeContext sets data-theme only
+      // after mount). Keep in sync with src/context/ThemeContext.jsx (KEY).
+      (function () {
+        try {
+          var t = localStorage.getItem('smartodl-theme');
+          if (t !== 'light' && t !== 'dark') {
+            t = 'light';
+          }
+          document.documentElement.setAttribute('data-theme', t);
+          document.documentElement.style.colorScheme = t;
+        } catch (e) { /* sandboxed iframe / storage blocked → CSS defaults to light */ }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
