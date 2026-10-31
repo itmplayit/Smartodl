@@ -39,7 +39,7 @@ const readFontScale = () => {
 };
 
 export default function MainLayout() {
-  const { user, isAuthenticated, logout } = useAuth();
+  const { user, isAuthenticated, loading: authLoading, logout } = useAuth();
   const { settings, isOn } = useSettings();
   const [infoPages, setInfoPages] = useState([]);
   useEffect(() => {
@@ -68,9 +68,13 @@ export default function MainLayout() {
 
   useEffect(() => {
     setLv(null);
-    if (!user) return;
+    // `user` comes from the cached profile, but the access token is memory-only
+    // and arrives a moment later (AuthContext restores it from the httpOnly
+    // refresh cookie). Calling now would 401 on every hard reload, so wait for
+    // the restore to finish — `authLoading` flips to false once it has.
+    if (authLoading || !user) return;
     gamificationApi.me().then(({ data }) => setLv(data.data)).catch(() => {});
-  }, [user?.id, user?.points]);
+  }, [authLoading, user?.id, user?.points]);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 80);

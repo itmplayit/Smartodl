@@ -231,7 +231,7 @@ async function provisionMissingDatabase() {
   } catch (err) {
     console.error(`[db] automatic database setup failed: ${err.message}`);
     console.error('      Import the schema yourself, then restart:');
-    console.error('        Windows   : double-click database\\IMPORT-DATABASE.bat');
+    console.error('        Manual    : mysql -u root -p education_platform < database\\education_platform.sql');
     console.error('        phpMyAdmin: Import tab -> database/education_platform.sql');
     return false;
   } finally {

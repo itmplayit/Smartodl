@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { certApi } from '../services/api';
 import { certificateTierLabel, contestRankLabel } from '../utils/certificateLabels';
+import { integrityTone as toneOf, normalizeTone } from '../utils/integrityTone';
 
 const TYPE_META = {
   course:    { icon: '🎓', label: 'Course Completion',    badge: 'COURSE',    ring: '#eab308' },
@@ -10,22 +11,23 @@ const TYPE_META = {
   milestone: { icon: '💻', label: 'Coding Milestone',     badge: 'MILESTONE', ring: '#10b981' },
   path:      { icon: '🛤️', label: 'Programme completion (legacy)', badge: 'PATH', ring: '#8b5cf6' },
 };
-const INTEGRITY_TONE = { green: '#16a34a', yellow: '#d97706', red: '#dc2626', muted: '#64748b' };
 function IntegrityChip({ integrity }) {
   if (!integrity || !integrity.shown) return null;
-  const color = INTEGRITY_TONE[integrity.tone] || INTEGRITY_TONE.muted;
+  // green / yellow / red — 'amber' purane payload ka alias hai
+  const t = toneOf(integrity.tone);
   return (
     <div
+      className={`integrity-chip tone-${normalizeTone(integrity.tone)}`}
       title={integrity.note || ''}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 7, marginTop: 10,
-        padding: '4px 10px', borderRadius: 999, background: `${color}22`,
-        border: `1px solid ${color}88`, color: '#0f172a', fontSize: 12, fontWeight: 700,
+        padding: '4px 10px', borderRadius: 999,
+        background: t.soft, border: `1px solid ${t.line}`, fontSize: 12, fontWeight: 700,
       }}
     >
-      <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, display: 'inline-block' }} />
-      Integrity: {integrity.label}
-      <span style={{ fontWeight: 500, opacity: 0.75 }}>
+      <span style={{ width: 9, height: 9, borderRadius: '50%', background: t.ink, display: 'inline-block', boxShadow: `0 0 0 3px ${t.soft}` }} />
+      <span style={{ color: t.ink }}>Integrity: {integrity.label}</span>
+      <span style={{ fontWeight: 600, color: t.ink, opacity: 0.85 }}>
         {integrity.available ? `${Number(integrity.score).toFixed(0)}/100` : '—'}
       </span>
     </div>
@@ -113,9 +115,10 @@ export default function Certificates() {
                     {t==='course' && <div className="stat-small"><div>Score</div><strong style={{color:'#0f172a'}}>{Number(c.score_percent||0)}%</strong></div>}
                     <div className="stat-small"><div>Issued</div><strong style={{color:'#0f172a'}}>{fd(c.issued_at)}</strong></div>
                   </div>
-                  <div style={{display:'flex',gap:8,marginTop:18}}>
-                    <a href={certApi.printUrl(c.public_token)} target="_blank" rel="noreferrer" className="btn btn-primary" style={{flex:1,textAlign:'center'}}>🖨️ Print / PDF</a>
-                    <Link to={certApi.verifyUrl(c.public_token)} className="btn" style={{flex:1,textAlign:'center',background:'rgba(255,255,255,0.6)',color:'#0f172a',border:'1px solid rgba(15,23,42,.15)'}}>🔗 Verify</Link>
+                  <div style={{display:'flex',gap:8,marginTop:18,flexWrap:'wrap'}}>
+                    <a href={certApi.pdfUrl(c.public_token)} download className="btn btn-primary" style={{flex:'1 1 150px',textAlign:'center'}}>⬇️ Download PDF</a>
+                    <a href={certApi.printUrl(c.public_token)} target="_blank" rel="noreferrer" className="btn" style={{flex:'1 1 110px',textAlign:'center',background:'rgba(255,255,255,0.6)',color:'#0f172a',border:'1px solid rgba(15,23,42,.15)'}}>🖨️ Print</a>
+                    <Link to={certApi.verifyUrl(c.public_token)} className="btn" style={{flex:'1 1 100px',textAlign:'center',background:'rgba(255,255,255,0.6)',color:'#0f172a',border:'1px solid rgba(15,23,42,.15)'}}>🔗 Verify</Link>
                   </div>
                 </div>
               </div>

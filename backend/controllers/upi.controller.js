@@ -329,11 +329,27 @@ const reject = asyncHandler(async (req, res) => {
 });
 
 /** GET /api/admin/upi-payments/preview — QR preview for the settings screen. */
+/**
+ * Admin "does my QR work?" preview.
+ *
+ * A missing UPI ID is a SETUP state, not an error: the admin page loads this on
+ * mount, so throwing 400 painted a red error on a freshly installed site. It now
+ * answers 200 with `configured: false` and a sentence to show in a neutral panel;
+ * a genuinely broken configuration (bad VPA format) still fails loudly.
+ */
 const adminPreview = asyncHandler(async (req, res) => {
   const cfg = await upi.config({ force: true });
-  if (!cfg.configured) throw ApiError.badRequest('First set a valid UPI ID in Website Settings (for example, college@okicici)');
+  if (!cfg.configured) {
+    return ok(res, {
+      ...cfg,
+      configured: false,
+      uri: null,
+      qr_svg: null,
+      message: 'Set a valid UPI ID in Website Settings (for example, college@okicici) to see the payment QR here.',
+    });
+  }
   const uri = upi.buildUri({ vpa: cfg.vpa, payee: cfg.payee, amountPaise: 100, reference: 'SODLTEST', note: 'Test payment' });
-  ok(res, { ...cfg, uri, qr_svg: qrcode.toSvg(uri, { scale: 6, level: 'M' }) });
+  ok(res, { ...cfg, configured: true, uri, qr_svg: qrcode.toSvg(uri, { scale: 6, level: 'M' }) });
 });
 
 module.exports = { publicConfig, checkout, submit, mine, adminList, approve, reject, adminPreview };

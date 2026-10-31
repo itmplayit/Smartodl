@@ -75,3 +75,37 @@ test('the band carries no punishment semantics', () => {
   // No field may imply a verdict, block or revocation.
   assert.deepEqual(Object.keys(result).filter((key) => /revoke|block|fail|cheat|penalt/i.test(key)), []);
 });
+
+// ---------------------------------------------------------------------------
+// tone must mirror band (green / yellow / red). Yellow used to be emitted as
+// 'amber', and every consumer (certificate HTML, student certificates, public
+// verify page) maps only green/yellow/red — so the yellow band printed grey.
+test('tone mirrors the band name so certificates can colour all three', () => {
+  const { bandForScore } = require('../../utils/integrityBand');
+  assert.deepEqual(
+    [bandForScore(100), bandForScore(80), bandForScore(79), bandForScore(50), bandForScore(49), bandForScore(0)]
+      .map((b) => `${b.band}/${b.tone}`),
+    ['green/green', 'green/green', 'yellow/yellow', 'yellow/yellow', 'red/red', 'red/red'],
+  );
+});
+
+test('no score at all is "insufficient data" (muted), never green', () => {
+  const { bandForScore } = require('../../utils/integrityBand');
+  for (const empty of [null, undefined, '']) {
+    const band = bandForScore(empty);
+    assert.equal(band.tone, 'muted');
+    assert.equal(band.label, 'Insufficient data');
+  }
+});
+
+test('certificate renderer has a colour for every tone (no grey fallback)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const root = path.resolve(__dirname, '..', '..', '..');
+  const src = fs.readFileSync(path.join(root, 'backend/controllers/certificate.controller.js'), 'utf8');
+  const map = src.match(/const INTEGRITY_TONE = \{([^}]*)\}/);
+  assert.ok(map, 'INTEGRITY_TONE map not found');
+  for (const tone of ['green', 'yellow', 'red', 'muted']) {
+    assert.match(map[1], new RegExp(`${tone}:\\s*'#[0-9a-f]{6}'`, 'i'), `missing colour for ${tone}`);
+  }
+});

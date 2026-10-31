@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { certApi } from '../services/api';
 import { certificateTierLabel, contestPlacementLabel, contestRankLabel } from '../utils/certificateLabels';
+import { integrityTone as toneOf, normalizeTone } from '../utils/integrityTone';
 
 const TYPE_META = {
   course:    { icon: '🎓', label: 'Course Completion',    check: 'This credential verifies successful course completion.',               ring: '#eab308', grad: 'linear-gradient(135deg,#fde68a 0%,#f59e0b 55%,#b45309 100%)' },
@@ -97,7 +98,7 @@ export default function VerifyCert() {
             {cert.integrity && cert.integrity.shown && (
               <div className="stat-small">
                 <div>Integrity review</div>
-                <strong style={{ color: cert.integrity.tone === 'green' ? '#16a34a' : cert.integrity.tone === 'red' ? '#dc2626' : cert.integrity.tone === 'yellow' ? '#d97706' : '#64748b' }}>
+                <strong className={`integrity-ink tone-${normalizeTone(cert.integrity.tone)}`} style={{ color: toneOf(cert.integrity.tone).ink }}>
                   ● {cert.integrity.label}
                   {cert.integrity.available ? ` · ${Number(cert.integrity.score).toFixed(0)}/100` : ''}
                 </strong>

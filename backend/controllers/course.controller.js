@@ -576,7 +576,24 @@ const uploadThumbnail = asyncHandler(async (req, res) => {
 
 /** POST /api/courses/:id/enroll */
 const enroll = asyncHandler(async (req, res) => {
-  const course = await q1('SELECT id, title, status, price, is_premium FROM courses WHERE id = ?', [req.params.id]);
+  // Enrolment is a student action. The route used to carry authorize('student'),
+  // which answered with a bare 403 "This action requires one of: student" — a
+  // dead end for an owner/admin who clicked Enrol to test their own course.
+  if (req.user.role !== 'student') {
+    throw new ApiError(
+      403,
+      'Enrolments belong to student accounts only. You are signed in as '
+      + `${req.user.role} — open the course with a student account (e.g. stu@test.local) to test enrolment.`,
+      { code: 'STUDENT_ONLY' },
+    );
+  }
+
+  // Id OR slug: the course page URL is /courses/<slug>, and a browser that
+  // posted that slug used to get a bare 404 "Course not found".
+  const course = await q1(
+    'SELECT id, title, status, price, is_premium FROM courses WHERE id = ? OR slug = ? LIMIT 1',
+    [Number(req.params.id) || 0, String(req.params.id)],
+  );
   if (!course) throw ApiError.notFound('Course not found');
 
   // Check existing enrolment first so the paid/premium gate cannot block a student who is already enrolled.
@@ -585,7 +602,14 @@ const enroll = asyncHandler(async (req, res) => {
 
   // Enrolment must not be allowed in a draft or archived course; previously the status was selected but never checked.
   if (course.status !== 'published') {
-    throw ApiError.badRequest('This course has not been published yet, so enrolment is not available.');
+    // Say WHAT to do about it: a brand-new course is a draft by default, which
+    // is by far the most common reason "enrol does nothing" on a fresh course.
+    throw new ApiError(
+      409,
+      `“${course.title}” is still a ${course.status} course, so students cannot enrol yet. `
+      + 'Publish it from Admin → Courses (or the Publish button on the course page) and enrolment opens immediately.',
+      { code: 'COURSE_NOT_PUBLISHED', status: course.status, course_id: course.id },
+    );
   }
 
   // Access matrix (never charge twice for the same course):
@@ -731,14 +755,11 @@ const updateProgress = asyncHandler(async (req, res) => {
       if (e && e.code === 'ER_NO_SUCH_TABLE') opened = { opened_at: new Date(0) };
       else throw e;
     }
-    if (!opened) {
-      throw ApiError.badRequest('Open the lesson and read it before marking it complete.');
-    }
-    const waited = Date.now() - new Date(opened.opened_at).getTime();
-    if (waited < dwellMs) {
-      throw ApiError.badRequest(
-        `This lesson just needs a bit of time open — you can mark it complete in about ${Math.ceil((dwellMs - waited) / 1000)}s.`,
-      );
+    const verdict = lessonOpens.dwellVerdict({ openedAt: opened && opened.opened_at, dwellMs });
+    if (!verdict.allowed) {
+      throw ApiError.badRequest(verdict.reason === 'not-opened'
+        ? 'Open the lesson and read it before marking it complete.'
+        : `This lesson just needs a bit of time open — you can mark it complete in about ${Math.ceil(verdict.waitMs / 1000)}s.`);
     }
   }
 

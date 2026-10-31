@@ -37,6 +37,7 @@ export default function Leaderboard() {
       <div className="section-head">
         <div><span className="eyebrow">Rankings</span><h1>Leaderboard</h1>
           <p className="muted small">Computed from real submissions, quiz scores and earned points — refreshed automatically.</p></div>
+        <h2 className="sr-only">Ranking table</h2>
         {meta && meta.my_rank && (
           <div className="card" style={{ minWidth: 200 }}>
             <div className="tiny muted">Your rank ({scope})</div>

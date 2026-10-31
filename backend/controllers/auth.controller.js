@@ -9,6 +9,7 @@ const { signAccess, signRefresh, findUserWithRole, setRefreshCookie, clearRefres
 const { notify } = require('../services/notification.service');
 const { readBool } = require('../services/settings.service');
 const { sendMail } = require('../services/mail.service');
+const loginGuard = require('../services/loginGuard.service');
 
 const tokenDigest = (token) => crypto.createHash('sha256').update(String(token)).digest('hex');
 
@@ -119,12 +120,29 @@ const login = asyncHandler(async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = typeof req.body.password === 'string' ? req.body.password : '';
   if (!email || !password || email.length > 160 || Buffer.byteLength(password, 'utf8') > 72) throw ApiError.badRequest('Email and password are required');
+
+  // Per-account backoff (services/loginGuard.service.js). The IP limiter stays
+  // generous for campus NAT; this is what actually stops password guessing.
+  const guard = loginGuard.check(email, req.ip);
+  if (guard.blocked) {
+    const mins = Math.ceil(guard.retryAfterSeconds / 60);
+    throw ApiError.tooMany(`Too many failed sign-in attempts for this account. Try again in about ${mins} minute${mins === 1 ? '' : 's'}.`);
+  }
+
   const row = await q1(
     `SELECT u.*, r.slug AS role FROM users u JOIN roles r ON r.id = u.role_id WHERE u.email = ?`,
     [email],
   );
-  if (!row || !row.password_hash) throw ApiError.unauthorized('Invalid email or password');
-  if (!(await bcrypt.compare(password, row.password_hash))) throw ApiError.unauthorized('Invalid email or password');
+  // One message builder for both cases: an unknown email must not get a
+  // different answer than a wrong password, otherwise the screen becomes an
+  // account-enumeration oracle ("this email exists but the password is wrong").
+  const badCredentials = (state) => ApiError.unauthorized(state.blocked
+    ? `Too many failed sign-in attempts. This account is paused for about ${Math.ceil(state.retryAfterSeconds / 60)} minute(s).`
+    : `Invalid email or password. ${state.failsLeft} attempt${state.failsLeft === 1 ? '' : 's'} left before the account pauses.`);
+
+  if (!row || !row.password_hash) throw badCredentials(loginGuard.fail(email, req.ip));
+  if (!(await bcrypt.compare(password, row.password_hash))) throw badCredentials(loginGuard.fail(email, req.ip));
+  loginGuard.reset(email, req.ip);
   if (row.status === 'suspended') throw ApiError.forbidden('Your account has been suspended. Please contact the administrator.');
   if (row.status === 'pending') throw ApiError.forbidden('Your account is awaiting admin approval. You will be able to sign in once it is approved.');
 

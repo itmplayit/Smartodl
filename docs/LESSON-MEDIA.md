@@ -81,7 +81,7 @@ Lesson kholte hi:
 Manual chahiye to:
 
 ```
-mysql -u root -p education_platform < database/patch-lesson-media.sql
+cd backend && npm run migrate        # manual SQL ki zaroorat nahi
 ```
 
 ## 6. Naya env (optional)

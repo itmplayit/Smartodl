@@ -6,7 +6,7 @@ import { Avatar, Badge, Countdown, DiffBadge, Empty, ErrorBox, Heatmap, Loader, 
 import { fmtNum, timeAgo, VERDICT_ICON } from '../utils/format';
 
 export default function StudentDashboard() {
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const [data, setData] = useState(null);
   const [gam, setGam] = useState(null);
   const [error, setError] = useState('');
@@ -20,6 +20,9 @@ export default function StudentDashboard() {
       .catch(() => {});
   };
   useEffect(() => {
+    // Same reason as MainLayout: a hard reload starts token-less, so any API
+    // call before the session restore finishes answers 401.
+    if (authLoading) return undefined;
     load();
     // Refresh when the user returns to this tab/route (e.g. after enrolling
     // from the course detail page) so newly enrolled courses appear without a
@@ -33,7 +36,7 @@ export default function StudentDashboard() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, []);
+  }, [authLoading]);
 
   if (error) return <div className="container section"><ErrorBox error={error} onRetry={load} /></div>;
   if (!data) return <Loader label="Building your dashboard…" />;

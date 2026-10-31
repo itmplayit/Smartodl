@@ -473,9 +473,18 @@ export default function QuizAttempt() {
      anticheat.module_quiz / anticheat.enforced. Before this flag existed those
      four checks were written as `&& isLive`, so on a module quiz they silently
      did nothing — the switches were on in the payload and dead in the browser. */
-  const isModuleQuiz = !!(ac && (ac.module_quiz === true || ac.module_quiz === '1' || ac.enforced === true))
+  const isModuleQuiz = !!(ac && (ac.module_quiz === true || ac.module_quiz === '1'))
     || !!(state.quiz && state.quiz.module_id);
-  const acEnforced = isLive || isModuleQuiz;
+  /* The backend decides which checks are in force for THIS quiz
+     (services/quizSupervision.service.js): live always, module quizzes always,
+     and normal/practice quizzes when the admin supervision switch is on. The
+     payload carries `enforced`/`supervised`, so the runner no longer has to
+     guess from quiz_type. */
+  const acEnforced = isLive || !!(ac && ac.enforced === true) || !!state.supervised || isModuleQuiz;
+  // Live-quiz rules that are now opt-in for normal/practice quizzes.
+  const rules = state.rules || (isLive ? { require_all_viewed: true, individualized_order: true } : {});
+  const ruleViewAll = isLive || !!rules.require_all_viewed;
+  const rulePersonalOrder = isLive || !!rules.individualized_order;
   const guardActive = tabGuardEnabled && !result && acEnforced;
   const lockdownActive = lockdownEnabled && !result && acEnforced;
   const cpBlockActive = cpBlockEnabled && !result && acEnforced;
@@ -532,9 +541,14 @@ export default function QuizAttempt() {
     || proctorRoomScan || proctorIdentity || proctorRecording;
   const advancedScreenNeeded = liveSnapshot || liveWebrtc || proctorRecording;
 
-  const proctorBasicCamera = acOn('proctor_camera_enabled', false) && !result && isLive;
-  const proctorCamera = (proctorBasicCamera || advancedCameraNeeded) && !result && isLive;
-  const proctorScreen = (acOn('proctor_screen_enabled', false) || advancedScreenNeeded) && !result && isLive;
+  /* Camera / screen share on a NON-live quiz is allowed only when the admin
+     turned on "Allow webcam/screen proctoring on normal + practice quizzes";
+     the backend then marks the payload camera_allowed/screen_allowed. The
+     consent screen below is unchanged, so nothing starts silently. */
+  const proctorPermitted = isLive || !!(ac && (ac.camera_allowed === true || ac.screen_allowed === true));
+  const proctorBasicCamera = acOn('proctor_camera_enabled', false) && !result && proctorPermitted;
+  const proctorCamera = (proctorBasicCamera || advancedCameraNeeded) && !result && proctorPermitted;
+  const proctorScreen = (acOn('proctor_screen_enabled', false) || advancedScreenNeeded) && !result && proctorPermitted;
   // Phone/book inference is part of the explicit basic Webcam option. An
   // advanced feature that happens to need a camera (e.g. identity only) must
   // not silently turn on a different object-detection check.
@@ -1026,12 +1040,14 @@ export default function QuizAttempt() {
     // The OR keeps one stable publishing session across the
     // preflight→paper handover instead of tearing every peer down.
   }, [liveWebrtc, proctorConsented || proctorSetupStarted, result, attemptId, iceServers]);
-  const liveTotal = isLive ? (state.questions || []).length : 0;
-  const allSeen = !isLive || liveTotal === 0 || seenCount >= liveTotal;
+  // "Open every question before submitting" now applies to any quiz that opted
+  // in (live keeps it unconditionally).
+  const liveTotal = ruleViewAll ? (state.questions || []).length : 0;
+  const allSeen = !ruleViewAll || liveTotal === 0 || seenCount >= liveTotal;
 
-  // Live rule: questions viewed before a reload must remain marked as seen.
+  // Questions viewed before a reload must remain marked as seen.
   useEffect(() => {
-    if (!isLive || !attemptId || seenHydrated.current) return undefined;
+    if (!ruleViewAll || !attemptId || seenHydrated.current) return undefined;
     seenHydrated.current = true;
     try {
       const saved = JSON.parse(localStorage.getItem(`lquiz-seen-${attemptId}`) || '[]');
@@ -1039,11 +1055,11 @@ export default function QuizAttempt() {
       if (seenRef.current.size) setSeenCount(seenRef.current.size);
     } catch (_) { /* storage unavailable — session-only tracking still works */ }
     return undefined;
-  }, [isLive, attemptId]);
+  }, [ruleViewAll, attemptId]);
 
-  // Live rule: the question currently on screen is now marked as seen.
+  // The question currently on screen is now marked as seen.
   useEffect(() => {
-    if (!isLive) return undefined;
+    if (!ruleViewAll) return undefined;
     const qq = (state.questions || [])[current];
     if (qq && !seenRef.current.has(String(qq.id))) {
       seenRef.current.add(String(qq.id));
@@ -1051,7 +1067,7 @@ export default function QuizAttempt() {
       try { localStorage.setItem(`lquiz-seen-${attemptId}`, JSON.stringify(Array.from(seenRef.current))); } catch (_) { /* ignore */ }
     }
     return undefined;
-  }, [current, isLive, state.questions, attemptId]);
+  }, [current, ruleViewAll, state.questions, attemptId]);
 
   // Persist each guard strike first, then reconcile to the server's atomic
   // counter. The previous client-only increment was lost on reload and ignored
@@ -1676,8 +1692,8 @@ export default function QuizAttempt() {
     const questions = state.questions || [];
 
     if (!auto) {
-      // Live rule: manual submission is not allowed until every question has been opened once.
-      if (isLive && liveTotal > 0 && seenCount < liveTotal) {
+      // Manual submission is not allowed until every question has been opened once.
+      if (ruleViewAll && liveTotal > 0 && seenCount < liveTotal) {
         toast.error(`\u{1F512} You can submit only after viewing all ${liveTotal} questions once (${seenCount}/${liveTotal} viewed so far). Open every question through the navigator or with \u2190/\u2192.`);
         return;
       }
@@ -2352,7 +2368,9 @@ export default function QuizAttempt() {
             <div style={{ fontSize: 'clamp(2rem, 8vh, 3rem)', lineHeight: 1.1 }}>🔒</div>
             <h1 style={{ margin: '8px 0', fontSize: 'clamp(1.25rem, 4.8vw, 1.8rem)' }}>Secure Lockdown Mode</h1>
             <p className="muted">
-              {isLive ? 'This is a secure live quiz.' : 'This is a supervised module quiz.'} It must be
+              {isLive ? 'This is a secure live quiz.'
+                : isModuleQuiz ? 'This is a supervised module quiz.'
+                  : 'This is a supervised quiz.'} It must be
               attempted in <strong>fullscreen lockdown</strong> —
               tab switching, refreshing, copy-paste, right-clicking, and other applications are not allowed.
               Leaving fullscreen records a violation.
@@ -2431,7 +2449,7 @@ export default function QuizAttempt() {
             {clock(remaining ?? 0)}
           </span>
           <span className="tag">{answeredCount}/{questions.length} answered</span>
-          {isLive && <span className="tag" title="Question numbers are individualized and stable for your attempt">🔀 Personal order</span>}
+          {rulePersonalOrder && <span className="tag" title="Question numbers are individualized and stable for your attempt">🔀 Personal order</span>}
           {isModuleQuiz && (
             <span className="tag" title="Module quiz — anti-cheat on, but never a camera or a screen share">
               📚 Module quiz · no camera
@@ -2448,8 +2466,8 @@ export default function QuizAttempt() {
               👁 Violations {violations}/{MAX_TAB_VIOLATIONS}
             </span>
           )}
-          {isLive && (
-            <span className="tag" title="Live rule: Submit unlocks only after every question has been opened once">
+          {ruleViewAll && (
+            <span className="tag" title="Rule: Submit unlocks only after every question has been opened once">
               {allSeen ? '\u{1F441} All viewed \u2713' : `\u{1F441} ${seenCount}/${liveTotal} viewed`}
             </span>
           )}
@@ -2457,7 +2475,7 @@ export default function QuizAttempt() {
           {saved && <span className="tiny muted">💾 Saved</span>}
           <button className="btn btn-primary" disabled={submitting || (isLive && !allSeen)} onClick={() => submit(false)}
             title={isLive && !allSeen ? `Open all ${liveTotal} questions first (${seenCount}/${liveTotal} viewed so far)` : testsOutstanding ? 'Run every coding question’s test cases first' : 'Submit the quiz'}>
-            {submitting ? 'Submitting…' : isLive && !allSeen ? `🔒 View all questions (${seenCount}/${liveTotal})` : testsOutstanding ? `🔒 Submit (${testsOutstanding} to run)` : 'Submit quiz'}
+            {submitting ? 'Submitting…' : ruleViewAll && !allSeen ? `🔒 View all questions (${seenCount}/${liveTotal})` : testsOutstanding ? `🔒 Submit (${testsOutstanding} to run)` : 'Submit quiz'}
           </button>
         </div>
       </div>
@@ -2618,7 +2636,7 @@ export default function QuizAttempt() {
                 return (
                   <button key={qq.id} onClick={() => { setCurrent(i); timeOnQuestion.current = 0; }}
                     className={`nav-cell ${i === current ? 'current' : ''} ${done ? 'done' : ''} ${flagged[qq.id] ? 'flag' : ''}`}
-                    title={`Question ${i + 1}${flagged[qq.id] ? ' · marked for review' : ''}${isLive ? (seenRef.current.has(String(qq.id)) ? ' · viewed \u2713' : ' · not viewed yet') : ''}`}>
+                    title={`Question ${i + 1}${flagged[qq.id] ? ' · marked for review' : ''}${ruleViewAll ? (seenRef.current.has(String(qq.id)) ? ' · viewed \u2713' : ' · not viewed yet') : ''}`}>
                     {i + 1}
                   </button>
                 );
@@ -2635,7 +2653,7 @@ export default function QuizAttempt() {
             <div className="stack tiny" style={{ gap: 6 }}>
               <span>Answered: <strong>{answeredCount}</strong> / {questions.length}</span>
               <span>Remaining: <strong>{questions.length - answeredCount}</strong></span>
-              {isLive && <span>Questions viewed: <strong>{seenCount}</strong> / {liveTotal}</span>}
+              {ruleViewAll && <span>Questions viewed: <strong>{seenCount}</strong> / {liveTotal}</span>}
               {codingQuestions.length > 0 && (
                 <span>Test cases run: <strong>{codingQuestions.filter((c) => runs[c.id]?.ran).length}</strong> / {codingQuestions.length}</span>
               )}

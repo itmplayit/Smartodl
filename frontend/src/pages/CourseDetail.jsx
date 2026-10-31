@@ -13,6 +13,7 @@ import { postToPaytm, openRazorpay } from './Pricing';
 import Reviews from '../components/Reviews';
 import Discussions from '../components/Discussions';
 import { safeExternalHref } from '../utils/safeUrl';
+import { errorText, isLessonNotOpened, dwellSecondsLeft } from '../utils/apiError';
 
 const ATTEMPT_LABEL = {
   in_progress: 'in progress',
@@ -41,6 +42,12 @@ export default function CourseDetail() {
   const [upiPayment, setUpiPayment] = useState(null);
   const [upiEnabled, setUpiEnabled] = useState(false);
   const [billing, setBilling] = useState({ demoMode: false, paymentsConfigured: false });
+  const [publishing, setPublishing] = useState(false);
+
+  /* The route param is a SLUG for every public URL (/courses/let-us-c), so it
+     must never be fed to numeric-only endpoints. Everything below uses this
+     resolved id; before the course loads it is null and nothing is fetched. */
+  const courseId = Number.isInteger(course?.id) ? course.id : null;
 
   const load = async () => {
     try { const { data } = await courseApi.get(id); setCourse(data.data); }
@@ -66,16 +73,36 @@ export default function CourseDetail() {
     return () => { alive = false; };
   }, [course?.id, course?.enrollment?.status, user]);
 
+  /** Managers can publish a draft straight from the course page. */
+  const publishCourse = async () => {
+    if (!courseId) return;
+    setPublishing(true);
+    try {
+      await courseApi.update(courseId, { status: 'published' });
+      toast.success('Course published — students can enrol now 🎉');
+      await load();
+    } catch (e) { toast.error(e.message); } finally { setPublishing(false); }
+  };
+
   const enroll = async () => {
     if (!user) return navigate('/login', { state: { from: `/courses/${id}` } });
     setBusy(true);
     try {
-      await courseApi.enroll(id);
+      await courseApi.enroll(courseId ?? id);
       toast.success('Enrolled successfully 🎉');
       await load();
     } catch (e) {
       // Paid course: the backend returns 402 PAYMENT_REQUIRED, so open the payment chooser.
-      if (e.response?.status === 402) { setPayOpen(true); } else { toast.error(e.message); }
+      if (e.response?.status === 402) { setPayOpen(true); }
+      else if (e.response?.data?.code === 'COURSE_NOT_PUBLISHED') {
+        // Draft course: offer the fix in the same breath as the error.
+        if (manageCourse) {
+          toast.error('This course is still a draft — publishing it opens enrolment.');
+          publishCourse();
+        } else {
+          toast.error(e.message);
+        }
+      } else { toast.error(e.response?.data?.error || e.message); }
     } finally { setBusy(false); }
   };
 
@@ -84,11 +111,11 @@ export default function CourseDetail() {
     if (!user) return navigate('/login', { state: { from: `/courses/${id}` } });
     setBusy(true);
     try {
-      const { data: d } = await courseApi.purchase(id, gateway);
+      const { data: d } = await courseApi.purchase(courseId ?? id, gateway);
       if (d.data.activated) { toast.success('You are already enrolled 🎉'); setPayOpen(false); return load(); }
 
       if (d.data.mode === 'demo') {
-        const { data: v } = await courseApi.purchaseVerify(id, { order_db_id: d.data.order.id });
+        const { data: v } = await courseApi.purchaseVerify(courseId ?? id, { order_db_id: d.data.order.id });
         if (v.data.activated) {
           toast.success(`You are now enrolled in ${course.title} (DEMO payment) 🎉`);
           setPayOpen(false); return load();
@@ -102,7 +129,7 @@ export default function CourseDetail() {
           user,
           verify: async (sig) => {
             try {
-              const { data: v } = await courseApi.purchaseVerify(id, { order_db_id: d.data.order.id, ...sig });
+              const { data: v } = await courseApi.purchaseVerify(courseId ?? id, { order_db_id: d.data.order.id, ...sig });
               if (v.data.pending) toast.info(v.data.message || 'Payment capture is pending — check the status again shortly.');
               return v.data.activated ? v : null;
             } catch (err) { toast.error(err.response?.data?.error || err.message); return null; }
@@ -129,15 +156,26 @@ export default function CourseDetail() {
     if (!user) return navigate('/login', { state: { from: `/courses/${id}` } });
     setBusy(true);
     try {
-      const { data: d } = await upiApi.checkoutCourse(Number(id));
+      const { data: d } = await upiApi.checkoutCourse(courseId ?? id);
       setUpiPayment(d.data.payment);
       if (d.data.reused) toast.info('Your previous UPI order is still open, so it is being shown again.');
     } catch (e) { toast.error(e.response?.data?.error || e.message); }
     finally { setBusy(false); }
   };
 
-  const completeLesson = async (lessonId) => {
+  /**
+   * Mark a lesson complete.
+   *
+   * The API has a two-step gate (services/lessonOpens.service.js): the lesson
+   * must have been opened, and the open must be at least N seconds old. Both
+   * failures are 400s, and the API's message says exactly what to do — so it is
+   * shown verbatim instead of the bare "Request failed with status code 400".
+   * If the lesson was never opened, this click opens it for the student (which
+   * starts their timer) instead of leaving them at a dead end.
+   */
+  const completeLesson = async (lesson) => {
     if (!course.enrollment) return;
+    const lessonId = typeof lesson === 'object' ? lesson.id : lesson;
     try {
       const { data } = await courseApi.progress(course.enrollment.id, lessonId);
       toast.success(`Progress updated — ${data.data.progress_percent}% complete`);
@@ -145,7 +183,20 @@ export default function CourseDetail() {
         toast.success('🎓 Course completed! Certificate issued.', { duration: 6000 });
       }
       await load();
-    } catch (e) { toast.error(e.message); }
+    } catch (e) {
+      if (isLessonNotOpened(e)) {
+        const row = typeof lesson === 'object'
+          ? lesson
+          : (course.modules || []).flatMap((m) => m.lessons || []).find((l) => l.id === lessonId);
+        if (row && !row.locked) await openLessonContent(row);
+        toast.info('Lesson khul gaya — thoda padho, phir "Mark complete" dabao.');
+        return;
+      }
+      const left = dwellSecondsLeft(e);
+      toast.error(left
+        ? `Bas ${left}s aur — lesson thoda der khula rehna chahiye, phir complete ho jayega.`
+        : errorText(e, 'Could not mark the lesson complete.'));
+    }
   };
 
   const openLessonContent = async (lesson) => {
@@ -185,7 +236,25 @@ export default function CourseDetail() {
   };
 
   if (error) return <div className="container section"><ErrorBox error={error} /></div>;
-  if (!course) return <Loader label="Opening course…" />;
+  // A failed load used to spin forever ("Opening course…") with no explanation.
+  if (!course) {
+    if (error) {
+      return (
+        <div className="container section">
+          <div className="card" style={{ maxWidth: 520, margin: '40px auto', textAlign: 'center', padding: 28 }}>
+            <div style={{ fontSize: '2rem' }} aria-hidden="true">🔍</div>
+            <h2 style={{ marginTop: 8 }}>Course not available</h2>
+            <p className="muted small">{error}</p>
+            <div className="row" style={{ gap: 10, justifyContent: 'center', marginTop: 12 }}>
+              <button type="button" className="btn btn-primary" onClick={() => { setError(''); load(); }}>Try again</button>
+              <Link className="btn btn-ghost" to="/courses">Browse courses</Link>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return <Loader label="Opening course…" />;
+  }
 
   const progress = course.enrollment ? Number(course.enrollment.progress_percent) : 0;
 
@@ -233,6 +302,28 @@ export default function CourseDetail() {
             : <span aria-hidden="true">📘</span>}
         </div>
       </header>
+
+      {/* --------------------- draft / unpublished banner --------------------- */}
+      {course.status !== 'published' && (
+        <div className="notice mt" style={{ textAlign: 'left', display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            {manageCourse ? (
+              <>
+                📝 <b>This course is {course.status}.</b> Students cannot see it and cannot enrol — enrolment opens the moment it is published.
+              </>
+            ) : (
+              <>
+                📝 <b>Course is {course.status}.</b> Enrolment opens once the instructor publishes it.
+              </>
+            )}
+          </div>
+          {manageCourse && (
+            <button type="button" className="btn btn-sm btn-primary" disabled={publishing} onClick={publishCourse}>
+              {publishing ? 'Publishing…' : '🚀 Publish now'}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* --------------------------- progress strip --------------------------- */}
       {enrolled && (
@@ -324,7 +415,7 @@ export default function CourseDetail() {
                                 <button
                                   type="button"
                                   className="btn btn-sm btn-ghost"
-                                  onClick={() => completeLesson(l.id)}
+                                  onClick={() => completeLesson(l)}
                                 >
                                   Mark complete
                                 </button>
@@ -458,7 +549,7 @@ export default function CourseDetail() {
 
                   {course.enrollment && (
                     <div className="lesson-panel-actions">
-                      <button type="button" className="btn btn-primary" onClick={() => completeLesson(lessonContent.id)}>
+                      <button type="button" className="btn btn-primary" onClick={() => completeLesson(lessonContent)}>
                         ✓ Mark this lesson complete
                       </button>
                       <span className="tiny muted">
@@ -557,6 +648,25 @@ export default function CourseDetail() {
                     </button>
                     {course.purchased && <p className="tiny muted mt-s center">Payment received — click "Enroll now".</p>}
                   </>
+                ) : course.status !== 'published' ? (
+                  <>
+                    <div className="notice mt" style={{ textAlign: 'left' }}>
+                      🔒 <b>Enrolment is closed</b> — this course is <b>{course.status}</b>.
+                      {manageCourse ? ' Publish it to open enrolment.' : ' Ask the instructor to publish it.'}
+                    </div>
+                    {manageCourse && (
+                      <button className="btn btn-primary btn-block mt" disabled={publishing} onClick={publishCourse}>
+                        {publishing ? 'Publishing…' : '🚀 Publish and open enrolment'}
+                      </button>
+                    )}
+                  </>
+                ) : user && user.role !== 'student' ? (
+                  // Owner/admin/developer: enrolling is a student action, so say it
+                  // here instead of letting the button fail with a bare 403.
+                  <div className="notice mt" style={{ textAlign: 'left' }}>
+                    ℹ️ You are signed in as <b>{user.role}</b>. Enrolment belongs to student accounts —
+                    log in as a student (e.g. <b>stu@test.local</b>) to test it. All lessons stay open for you here.
+                  </div>
                 ) : (
                   <button className="btn btn-primary btn-block mt" disabled={busy || !user} onClick={enroll}>
                     {busy ? 'Enrolling…' : user ? 'Enroll now' : 'Login to enrol'}
@@ -589,11 +699,11 @@ export default function CourseDetail() {
       {/* ------------------------- reviews & discussions ------------------------- */}
       <section className="card mt" style={{ marginTop: 36 }}>
         <h3 className="mb">⭐ Ratings & Reviews</h3>
-        <Reviews courseId={Number(id)} />
+        {courseId ? <Reviews courseId={courseId} /> : null}
       </section>
       <section className="card mt">
         <h3 className="mb">💬 Course Discussions</h3>
-        <Discussions parentType="course" parentId={Number(id)} />
+        {courseId ? <Discussions parentType="course" parentId={courseId} /> : null}
       </section>
 
       {/* ---------------------- paid course: payment chooser ---------------------- */}

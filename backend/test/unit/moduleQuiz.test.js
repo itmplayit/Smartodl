@@ -110,3 +110,70 @@ test('expired attempts are settled after the deadline + grace, and never while f
     started_at: minutesAgo(60 * 30), last_seen_at: minutesAgo(5), time_limit_minutes: 0,
   }, now), false);
 });
+
+/* ------------------- live features on normal / practice quizzes ------------------- */
+const supervision = require('../../services/quizSupervision.service');
+
+test('normal + practice quizzes get the live anti-cheat floor', () => {
+  const creator = {
+    tab_guard_enabled: false, quiz_lockdown_enabled: false, quiz_cp_block: false,
+    screenshot_block_enabled: false, exam_safe_mode: false,
+  };
+  for (const quiz_type of ['normal', 'practice']) {
+    const out = supervision.resolveAntiCheat({ quiz_type, module_id: null }, creator, { supervision: true });
+    assert.equal(out.tab_guard_enabled, true, quiz_type);
+    assert.equal(out.quiz_lockdown_enabled, true, quiz_type);
+    assert.equal(out.quiz_cp_block, true, quiz_type);
+    assert.equal(out.screenshot_block_enabled, true, quiz_type);
+    assert.equal(out.exam_safe_mode, true, quiz_type);
+    assert.equal(out.enforced, true, quiz_type);
+    // Privacy default: a non-live quiz never asks for a camera.
+    assert.equal(out.proctor_camera_enabled, false, quiz_type);
+    assert.equal(out.camera_allowed, false, quiz_type);
+  }
+});
+
+test('the supervision switch OFF hands control back to the creator', () => {
+  const out = supervision.resolveAntiCheat(
+    { quiz_type: 'normal' }, { tab_guard_enabled: false, quiz_lockdown_enabled: false }, { supervision: false },
+  );
+  assert.equal(out.tab_guard_enabled, false);
+  assert.equal(out.enforced, false);
+});
+
+test('live quizzes are untouched by the supervision layer', () => {
+  const out = supervision.resolveAntiCheat(
+    { quiz_type: 'live' }, { tab_guard_enabled: true, quiz_cp_block: false }, { supervision: true },
+  );
+  assert.equal(out.quiz_scope, 'live');
+  assert.equal(out.enforced, false);
+  assert.equal(out.quiz_cp_block, false); // creator's choice survives
+});
+
+test('camera on a non-live quiz needs the admin proctoring switch', () => {
+  const creator = { proctor_camera_enabled: true, proctor_screen_enabled: true };
+  const off = supervision.resolveAntiCheat({ quiz_type: 'normal' }, creator, { supervision: true, proctoring: false });
+  assert.equal(off.proctor_camera_enabled, false);
+  assert.equal(off.camera_allowed, false);
+
+  const on = supervision.resolveAntiCheat({ quiz_type: 'normal' }, creator, { supervision: true, proctoring: true });
+  assert.equal(on.proctor_camera_enabled, true);
+  assert.equal(on.camera_allowed, true);
+});
+
+test('a module quiz still never gets a camera, even with proctoring on', () => {
+  const out = supervision.resolveAntiCheat(
+    { quiz_type: 'normal', module_id: 7 }, { proctor_camera_enabled: true },
+    { supervision: true, proctoring: true },
+  );
+  assert.equal(out.proctor_camera_enabled, false);
+  assert.equal(out.proctor_screen_enabled, false);
+  assert.equal(out.module_quiz, true);
+});
+
+test('rules: live forces both, others opt in', () => {
+  assert.deepEqual(supervision.rulesFor({ quiz_type: 'live' }), { require_all_viewed: true, individualized_order: true });
+  assert.deepEqual(supervision.rulesFor({ quiz_type: 'normal', require_all_viewed: 1, individualized_order: 0 }),
+    { require_all_viewed: true, individualized_order: false });
+  assert.deepEqual(supervision.rulesFor({ quiz_type: 'practice' }), { require_all_viewed: false, individualized_order: false });
+});

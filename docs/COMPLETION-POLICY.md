@@ -75,7 +75,7 @@ client ke claim par nahi.
 ## Database
 
 `npm run migrate` adds: `courses.completion_policy`, `lesson_watch`,
-`lesson_watch_buckets`. Manual ke liye `database/patch-lesson-watch.sql`.
+`lesson_watch_buckets`. Manual ke liye `cd backend && npm run migrate`.
 
 ## Verification (sandbox, MariaDB 11.8, 12-second demo video)
 

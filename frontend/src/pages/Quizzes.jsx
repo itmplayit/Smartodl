@@ -44,6 +44,8 @@ export default function Quizzes() {
       <div className="section-head">
         <div><span className="eyebrow">Assessments</span><h1>Quizzes & live tests</h1>
           <p className="muted small">MCQ, multiple-correct, true/false, short answer and coding questions — auto-graded with instant ranking.</p></div>
+        {/* quiz cards are h3 — keep the outline h1 → h2 → h3 */}
+        <h2 className="sr-only">All quizzes and live tests</h2>
       </div>
 
       <div className="tabs">

@@ -124,10 +124,13 @@ async function hintInfo(userId, problemId, hasHints) {
 }
 
 /* -------------------------------- course reviews -------------------------------- */
-async function visibleCourse(req, courseId) {
+async function visibleCourse(req, courseRef) {
+  // The public course page lives at /courses/<slug>, so every course-scoped
+  // endpoint has to accept a slug as well as a numeric id. It used to accept
+  // only ids, which turned the course page's own review call into a 404.
   const course = await q1(
-    'SELECT id, status, instructor_id FROM courses WHERE id = ?',
-    [courseId],
+    'SELECT id, status, instructor_id FROM courses WHERE id = ? OR slug = ? LIMIT 1',
+    [Number(courseRef) || 0, String(courseRef)],
   );
   if (!course) throw ApiError.notFound('Course not found');
   const canManage = !!req.user && (
@@ -139,17 +142,20 @@ async function visibleCourse(req, courseId) {
 }
 
 const listReviews = asyncHandler(async (req, res) => {
-  await visibleCourse(req, req.params.id);
+  const { course } = await visibleCourse(req, req.params.id);
   const rows = await q(
     `SELECT r.id, r.rating, r.comment, r.created_at, u.full_name, u.avatar,
             (SELECT slug FROM roles ro WHERE ro.id = u.role_id) AS role
        FROM course_reviews r JOIN users u ON u.id = r.user_id
       WHERE r.course_id = ? ORDER BY r.created_at DESC LIMIT 50`,
-    [req.params.id],
+    [course.id],
   );
-  const agg = await q1('SELECT COUNT(*) AS count, COALESCE(AVG(rating),0) AS average FROM course_reviews WHERE course_id = ?', [req.params.id]);
+  // Same trap as the row query above: the aggregate and "my review" lookups used
+  // the raw URL param, so on a slug URL the page showed "0 reviews" while the
+  // list right underneath was full.
+  const agg = await q1('SELECT COUNT(*) AS count, COALESCE(AVG(rating),0) AS average FROM course_reviews WHERE course_id = ?', [course.id]);
   let mine = null;
-  if (req.user) mine = await q1('SELECT id, rating, comment FROM course_reviews WHERE course_id = ? AND user_id = ?', [req.params.id, req.user.id]);
+  if (req.user) mine = await q1('SELECT id, rating, comment FROM course_reviews WHERE course_id = ? AND user_id = ?', [course.id, req.user.id]);
   ok(res, { reviews: rows, count: Number(agg.count), average: Math.round(Number(agg.average) * 10) / 10, mine });
 });
 
@@ -188,8 +194,18 @@ const removeReview = asyncHandler(async (req, res) => {
 const PARENT_TYPES = ['problem', 'course'];
 
 async function assertDiscussionParentVisible(req, parentType, parentId) {
-  const id = Number(parentId);
-  if (!PARENT_TYPES.includes(parentType) || !Number.isInteger(id) || id <= 0) {
+  if (!PARENT_TYPES.includes(parentType)) {
+    throw ApiError.badRequest('parent_type must be problem or course');
+  }
+  // A course page lives at /courses/<slug>, so a slug is a legal parent_id for
+  // course discussions. Resolve it to the numeric id BEFORE validating, instead
+  // of answering 400 to a perfectly valid course.
+  let id = Number(parentId);
+  if (parentType === 'course' && (!Number.isInteger(id) || id <= 0)) {
+    const bySlug = await q1('SELECT id FROM courses WHERE slug = ? LIMIT 1', [String(parentId || '')]);
+    id = bySlug ? Number(bySlug.id) : NaN;
+  }
+  if (!Number.isInteger(id) || id <= 0) {
     throw ApiError.badRequest('parent_type (problem|course) and parent_id are required');
   }
 

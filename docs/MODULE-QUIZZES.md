@@ -103,5 +103,5 @@ aur completion ke liye **koi ek** pass karna kaafi hai.
 ## Database
 
 `npm run migrate` → `quizzes.module_id` + index + 2 settings rows.
-Manual: `database/patch-module-quizzes.sql` (idempotent; module quiz jo live ho
+Manual: `cd backend && npm run migrate` (idempotent; module quiz jo live ho
 gaya ho use report bhi karta hai).

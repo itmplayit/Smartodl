@@ -21,14 +21,26 @@ export default function Discussions({ parentType, parentId }) {
   const [replyText, setReplyText] = useState('');
   const [replying, setReplying] = useState(false);
 
+  // Guard: an undefined/NaN parent id used to send
+  // GET /api/discussions?parent_id=NaN and paint a 400 error box on the page.
+  const validParent = Number.isInteger(Number(parentId)) && Number(parentId) > 0;
+
   const load = () => {
+    if (!validParent) {
+      setList([]);
+      setError(parentType === 'course'
+        ? 'Discussions open once this course has loaded.'
+        : 'Discussions are not available here.');
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     communityApi.discussions(parentType, parentId)
       .then(({ data }) => setList(data.data))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   };
-  useEffect(load, [parentType, parentId]);
+  useEffect(load, [parentType, parentId, validParent]); /* eslint-disable-line react-hooks/exhaustive-deps */
 
   const openThread = async (d) => {
     setOpen({ discussion: d, replies: null });
@@ -39,6 +51,7 @@ export default function Discussions({ parentType, parentId }) {
   };
 
   const postThread = async () => {
+    if (!validParent) { toast.error('This discussion board is not ready yet — reload the page.'); return; }
     if (!title.trim() || !body.trim()) { toast.error('Both a title and details are required'); return; }
     setPosting(true);
     try {

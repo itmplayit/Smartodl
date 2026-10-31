@@ -105,6 +105,25 @@ async function ensureFeatureFlags() {
     group: 'anti_cheat',
   })) created.push('module_quiz_anticheat_enabled');
 
+  /* 2d. Supervision for normal + practice quizzes.
+     A course quiz and a practice quiz run with the same safety net a live quiz
+     has (tab guard, fullscreen lockdown, copy-paste block, screenshot block,
+     Safe Exam Mode, per-question timers, "view every question" rule) — without
+     the live session. Webcam/screen share stay a separate, OFF-by-default
+     decision because they need explicit student consent. */
+  if (await ensureFlag({
+    key: 'normal_quiz_supervision_enabled',
+    label: 'Normal + practice quiz supervision (tab guard, lockdown, copy-paste + screenshot block, Safe Exam Mode)',
+    dflt: '1',
+    group: 'anti_cheat',
+  })) created.push('normal_quiz_supervision_enabled');
+  if (await ensureFlag({
+    key: 'normal_quiz_proctoring_enabled',
+    label: 'Allow webcam/screen proctoring on normal + practice quizzes (OFF by default — needs student consent)',
+    dflt: '0',
+    group: 'anti_cheat',
+  })) created.push('normal_quiz_proctoring_enabled');
+
   /* ── 3. live proctoring (webcam + screen share) ──
      Both default to OFF. Pointing a camera at a student is an institutional
      decision with consent implications; it must never switch itself on

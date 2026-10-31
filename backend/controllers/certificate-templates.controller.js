@@ -4,6 +4,7 @@ const { q1, exec } = require('../config/db');
 const { asyncHandler, ok, created, noContent, ApiError, slugify } = require('../utils/helpers');
 const tpl = require('../services/certificateTemplates.service');
 const { renderCertificateHtml } = require('./certificate.controller');
+const { publicUrl } = require('../middleware/upload');
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
 const MAX_LEN = {
@@ -48,6 +49,16 @@ function clean(body, { partial = false } = {}) {
   }
 
   if (body.is_active !== undefined) out.is_active = body.is_active ? 1 : 0;
+
+  // Optional logo. Empty string clears it. Only a path inside our own upload
+  // directory (or an https URL) is accepted — never arbitrary HTML/JS.
+  if (body.logo_path !== undefined) {
+    const v = String(body.logo_path || '').trim();
+    if (!v) out.logo_path = null;
+    else if (/^https:\/\/[^\s"'<>]+$/i.test(v)) out.logo_path = v.slice(0, 255);
+    else if (/^[a-z0-9/_.-]+$/i.test(v) && !v.includes('..')) out.logo_path = v.slice(0, 255);
+    else throw ApiError.badRequest('Logo must be an uploaded image path or an https URL');
+  }
   return out;
 }
 
@@ -137,6 +148,31 @@ const duplicate = asyncHandler(async (req, res) => {
   created(res, await q1('SELECT * FROM certificate_templates WHERE id = ?', [r.insertId]));
 });
 
+/**
+ * POST /api/admin/certificate-templates/:id/logo  (multipart, field "logo")
+ *
+ * Uploads the template logo (PNG/JPG/WebP, signature-validated by the shared
+ * middleware) into uploads/banners and stores its public path on the template.
+ * The certificate HTML and the PDF both read it from there.
+ */
+const uploadLogo = asyncHandler(async (req, res) => {
+  const row = await q1('SELECT id FROM certificate_templates WHERE id = ?', [req.params.id]);
+  if (!row) throw ApiError.notFound('Template not found');
+  if (!req.file) throw ApiError.badRequest('Choose a PNG, JPG or WebP image');
+  const rel = `banners/${req.file.filename}`;
+  await exec('UPDATE certificate_templates SET logo_path = ? WHERE id = ?', [rel, row.id]);
+  // publicUrl() takes the multer file object (it reads file.path), not a path.
+  ok(res, { logo_path: rel, url: publicUrl(req.file) });
+});
+
+/** DELETE /api/admin/certificate-templates/:id/logo — back to the default mark. */
+const removeLogo = asyncHandler(async (req, res) => {
+  const row = await q1('SELECT id FROM certificate_templates WHERE id = ?', [req.params.id]);
+  if (!row) throw ApiError.notFound('Template not found');
+  await exec('UPDATE certificate_templates SET logo_path = NULL WHERE id = ?', [row.id]);
+  noContent(res);
+});
+
 const setDefault = asyncHandler(async (req, res) => {
   const row = await tpl.setDefault(req.params.id);
   if (!row) throw ApiError.notFound('Template not found');
@@ -209,4 +245,4 @@ const preview = asyncHandler(async (req, res) => {
   res.type('html').send(html);
 });
 
-module.exports = { list, getOne, create, update, duplicate, setDefault, remove, preview };
+module.exports = { list, getOne, create, update, duplicate, setDefault, remove, preview, uploadLogo, removeLogo };

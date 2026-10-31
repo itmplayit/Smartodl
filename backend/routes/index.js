@@ -37,9 +37,22 @@ const staff = [authenticate, authorize('admin', 'developer')];
 // The admin switches whole feature areas ON/OFF from the Feature Control panel.
 // These gates block the matching APIs immediately (nav + pages gate on the client).
 const settingsService = require('../services/settings.service');
-const featureGate = (key, label) => async (req, res, next) => {
+
+/**
+ * Feature gate.
+ *
+ * `allowStaff` keeps the ADMIN MANAGER working while the student-facing feature
+ * is switched off — otherwise /admin/achievements opened with a red 403 and an
+ * empty list, and the admin could not prepare the content before enabling it.
+ * Only the management (staff) side is exempted; students still get the 403.
+ */
+const featureGate = (key, label, { allowStaff = false } = {}) => async (req, res, next) => {
   try {
     if (await settingsService.readBool(key, false)) return next();
+    if (allowStaff) {
+      await new Promise((resolve) => { optionalAuth(req, res, resolve); });
+      if (req.user && ['owner', 'admin', 'developer'].includes(req.user.role)) return next();
+    }
     return res.status(403).json({ success: false, error: `${label} is currently disabled by the administrator` });
   } catch (error) { return next(error); }
 };
@@ -48,7 +61,8 @@ router.use('/quiz-attempts', featureGate('quiz_system_enabled', 'The quiz system
 router.use('/coding', featureGate('coding_system_enabled', 'The coding arena'));
 router.use('/contests', featureGate('contests_enabled', 'Contests'));
 router.use('/leaderboard', featureGate('leaderboard_enabled', 'The leaderboard'));
-router.use('/achievements', featureGate('achievements_enabled', 'Achievements'));
+// Achievements: students see the gate, admins/developers keep the manager.
+router.use('/achievements', featureGate('achievements_enabled', 'Achievements', { allowStaff: true }));
 
 /* ------------------------------- health ------------------------------- */
 router.get('/health', async (req, res) => {
@@ -175,7 +189,7 @@ router.get('/courses/:id', optionalAuth, courses.getCourse);
 router.put('/courses/:id', authenticate, authorize('admin', 'developer'), requirePermission('edit_course'), writeLimiter, courses.updateCourse);
 router.delete('/courses/:id', authenticate, authorize('admin', 'developer'), requirePermission('delete_course'), courses.removeCourse);
 router.post('/courses/:id/thumbnail', authenticate, authorize('admin', 'developer'), requirePermission('edit_course'), imageUpload.single('thumbnail'), validateRasterImage, courses.uploadThumbnail);
-router.post('/courses/:id/enroll', authenticate, authorize('student'), courses.enroll);
+router.post('/courses/:id/enroll', authenticate, courses.enroll); // role checked in the controller for a clearer message
 router.post('/courses/:id/purchase', authenticate, authorize('student'), writeLimiter, subs.courseCheckout);
 router.post('/courses/:id/purchase/verify', authenticate, authorize('student'), writeLimiter, subs.courseVerify);
 router.get('/courses/:id/enrollments', ...staff, requirePermission('view_student_data'), courses.courseEnrollments);
@@ -210,14 +224,17 @@ router.post('/enrollments/:id/progress', authenticate, authorize('student'), cou
 /* ----------------------------- certificates ----------------------------- */
 router.get('/certificates/mine', authenticate, certs.myCertificates);
 router.get('/cert/:token/print', certLimiter, certs.printView);   // public printable HTML
+router.get('/cert/:token/pdf', certLimiter, certs.pdfView);       // public A4 PDF download
 router.get('/cert/:token', certLimiter, certs.verify);            // public JSON verification
 
 /* ----------------------- admin certificate management ----------------------- */
 const adminCerts = require('../controllers/admin-certificates.controller');
 router.get('/admin/certificates/stats', ...adminOnly, adminCerts.stats);
 router.get('/admin/certificates', ...adminOnly, adminCerts.listAll);
+router.get('/admin/certificates/export.csv', ...adminOnly, adminCerts.exportCsv);
 router.delete('/admin/certificates/:id', ...adminOnly, adminCerts.revoke);
 router.post('/admin/certificates/:id/reissue', ...adminOnly, adminCerts.reissue);
+router.post('/admin/certificates/:id/restore', ...adminOnly, adminCerts.restore);
 
 /* certificate design templates (admin) */
 const certTpl = require('../controllers/certificate-templates.controller');
@@ -228,6 +245,9 @@ router.get('/admin/certificate-templates/:id', ...adminOnly, certTpl.getOne);
 router.put('/admin/certificate-templates/:id', ...adminOnly, writeLimiter, certTpl.update);
 router.post('/admin/certificate-templates/:id/duplicate', ...adminOnly, writeLimiter, certTpl.duplicate);
 router.post('/admin/certificate-templates/:id/default', ...adminOnly, writeLimiter, certTpl.setDefault);
+router.post('/admin/certificate-templates/:id/logo', ...adminOnly, writeLimiter,
+  bannerUpload.single('logo'), validateRasterImage, certTpl.uploadLogo);
+router.delete('/admin/certificate-templates/:id/logo', ...adminOnly, writeLimiter, certTpl.removeLogo);
 router.delete('/admin/certificate-templates/:id', ...adminOnly, writeLimiter, certTpl.remove);
 
 /* ------------------------- public information pages ------------------------- */

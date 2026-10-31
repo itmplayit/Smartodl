@@ -36,6 +36,7 @@ const UPGRADES = [
   ['lesson-media', () => require('./lessonMedia.service').ensureSchema()],
   ['lesson-watch', () => require('./lessonWatch.service').ensureSchema()],
   ['module-quizzes', () => require('./moduleQuiz.service').ensureSchema()],
+  ['quiz-supervision', () => require('./quizSupervision.service').ensureSchema()],
 ];
 
 /**
@@ -46,6 +47,8 @@ const UPGRADES = [
 const CRITICAL_COLUMNS = [
   ['quizzes', 'course_id'],
   ['quizzes', 'module_id'],
+  ['quizzes', 'require_all_viewed'],
+  ['quizzes', 'individualized_order'],
   ['lessons', 'video_path'],
   ['courses', 'completion_policy'],
   ['lessons', 'pdf_path'],

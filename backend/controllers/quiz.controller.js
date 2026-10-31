@@ -14,6 +14,7 @@ const { buildXlsx } = require('../utils/xlsx');
 const aiDetect = require('../services/aiDetection.service');
 const antiCheat = require('../services/anticheatSettings.service');
 const moduleQuiz = require('../services/moduleQuiz.service');
+const quizSupervision = require('../services/quizSupervision.service');
 
 /**
  * Anti-cheat switches for one quiz's runner payload.
@@ -26,24 +27,14 @@ const moduleQuiz = require('../services/moduleQuiz.service');
 async function antiCheatModuleFloor(quiz) {
   // One contract for every quiz: flags are booleans, not '1'/'0' strings.
   const resolved = moduleQuiz.normaliseFlags(await antiCheat.resolveForUser(quiz.created_by));
-  if (!quiz || !quiz.module_id) return resolved;
-  const floor = await moduleQuiz.moduleAntiCheatFloor();
-  // Camera and screen share are NEVER negotiable for a module quiz — not even
-  // when the Feature Control floor switch is off. Off only means "use the
-  // creator's own tab-guard / lockdown / clipboard choices"; a module quiz that
-  // asked for a webcam would break the promise made to every student.
-  const merged = floor
-    ? moduleQuiz.applyAntiCheatFloor(resolved, floor)
-    : resolved;
-  return {
-    ...merged,
-    proctor_camera_enabled: false,
-    proctor_screen_enabled: false,
-    module_quiz: true,
-    enforced: true,
-    camera_allowed: false,
-    screen_allowed: false,
-  };
+  // Feature Control decides the institutional floor; the service below applies
+  // it to module quizzes, normal (course) quizzes and practice quizzes alike,
+  // while keeping camera/screen share a separate, opt-in decision.
+  const [supervision, proctoring] = await Promise.all([
+    quizSupervision.supervisionEnabled(),
+    quizSupervision.proctoringEnabled(),
+  ]);
+  return quizSupervision.resolveAntiCheat(quiz, resolved, { supervision, proctoring });
 }
 const { readBool, readSetting } = require('../services/settings.service');
 const liveProctor = require('../services/liveProctor.service');
@@ -459,8 +450,9 @@ const create = asyncHandler(async (req, res) => {
   const result = await exec(
     `INSERT INTO quizzes (title, slug, description, category_id, course_id, module_id, difficulty, quiz_type, negative_marking,
         time_limit_minutes, passing_score, start_at, end_at, max_participants, status, shuffle_questions,
-        show_answers_after, allow_reattempt, is_private, access_password, created_by, is_premium)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        show_answers_after, allow_reattempt, is_private, access_password, created_by, is_premium,
+        require_all_viewed, individualized_order)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [title, slug, b.description || null, categoryId, courseId, moduleId, difficulty, quizType,
       boundedQuizNumber(b.negative_marking, 0, 0, 100),
       Math.round(boundedQuizNumber(b.time_limit_minutes, 15, 1, 1440)),
@@ -469,7 +461,8 @@ const create = asyncHandler(async (req, res) => {
         ? null : Math.round(boundedQuizNumber(b.max_participants, 1, 1, 1000000)),
       status, b.shuffle_questions ? 1 : 0, b.show_answers_after === false ? 0 : 1,
       b.allow_reattempt ? 1 : 0, isPrivate ? 1 : 0, privHash, req.user.id,
-      ['owner', 'admin'].includes(req.user.role) && b.is_premium ? 1 : 0],
+      ['owner', 'admin'].includes(req.user.role) && b.is_premium ? 1 : 0,
+      b.require_all_viewed ? 1 : 0, b.individualized_order ? 1 : 0],
   );
   created(res, publicQuiz(await q1('SELECT * FROM quizzes WHERE id = ?', [result.insertId])));
 });
@@ -486,7 +479,8 @@ const update = asyncHandler(async (req, res) => {
 
   const allowed = ['title', 'description', 'category_id', 'course_id', 'difficulty', 'quiz_type', 'negative_marking',
     'time_limit_minutes', 'passing_score', 'start_at', 'end_at', 'max_participants', 'status',
-    'shuffle_questions', 'show_answers_after', 'allow_reattempt', 'module_id'];
+    'shuffle_questions', 'show_answers_after', 'allow_reattempt', 'module_id',
+    'require_all_viewed', 'individualized_order'];
   const data = {};
   allowed.forEach((key) => { if (req.body[key] !== undefined) data[key] = req.body[key]; });
   if (req.body.is_premium !== undefined) data.is_premium = req.body.is_premium ? 1 : 0;
@@ -1998,9 +1992,12 @@ const orderSeedValue = (value) => {
  */
 async function questionAssignment(questions, attempt, quiz) {
   const live = quiz.quiz_type === 'live';
-  const shuffle = live || Number(quiz.shuffle_questions) === 1;
+  // `individualized_order` gives a normal/practice quiz the same per-student
+  // paper a live session gets (stable for the attempt, different per seat).
+  const individualized = quizSupervision.rulesFor(quiz).individualized_order;
+  const shuffle = live || individualized || Number(quiz.shuffle_questions) === 1;
   let seatNumber = 1;
-  if (live && questions.length) {
+  if ((live || (individualized && questions.length)) && questions.length) {
     const sessionStart = quiz.start_at || quiz.live_started_at || attempt.started_at;
     const row = await q1(
       `SELECT COUNT(*) AS c FROM quiz_attempts
@@ -2236,6 +2233,12 @@ async function attemptPayload(attempt, quiz) {
     },
     questions: lobby ? [] : safeQuestions,
     lobby,
+    // The live-quiz *rules* (open every question before submitting,
+    // individualized paper) are now available to normal and practice quizzes
+    // too, opt-in per quiz. `supervised` tells the runner the anti-cheat suite
+    // is in force even though this is not a live session.
+    rules: quizSupervision.rulesFor(quiz),
+    supervised: effectiveAntiCheat.enforced === true && quiz.quiz_type !== 'live',
     anticheat: effectiveAntiCheat,
     proctor_policy: proctorPolicy,
     answers,
@@ -2562,7 +2565,9 @@ const submitAttempt = asyncHandler(async (req, res) => {
     [attempt.id],
   );
   const quizTiming = await q1(
-    'SELECT id, quiz_type, shuffle_questions, start_at, live_started_at, time_limit_minutes, end_at FROM quizzes WHERE id = ?',
+    `SELECT id, quiz_type, shuffle_questions, require_all_viewed, individualized_order,
+            start_at, live_started_at, time_limit_minutes, end_at
+       FROM quizzes WHERE id = ?`,
     [attempt.quiz_id],
   );
   const startMs = new Date(attempt.started_at).getTime();
@@ -2577,7 +2582,8 @@ const submitAttempt = asyncHandler(async (req, res) => {
   // backstop — the UI disables the button anyway. Auto-submits (timer /
   // host end) omit the field and are never blocked by this rule.
   const seenField = req.body && Array.isArray(req.body.seen_question_ids) ? new Set(req.body.seen_question_ids.map(String)) : null;
-  if (seenField && quizTiming && quizTiming.quiz_type === 'live' && !outOfTime) {
+  const ruleViewAll = !!(quizTiming && quizSupervision.rulesFor(quizTiming).require_all_viewed);
+  if (seenField && quizTiming && ruleViewAll && !outOfTime) {
     const canonicalForSeen = await q('SELECT id FROM quiz_questions WHERE quiz_id = ? ORDER BY position, id', [attempt.quiz_id]);
     const assignedForSeen = await questionAssignment(canonicalForSeen, attempt, quizTiming);
     const unseenCount = assignedForSeen.questions.filter((row) => !seenField.has(String(row.id))).length;

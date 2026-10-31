@@ -57,6 +57,8 @@ const COLOR_ORDER = ['color_bg_from', 'color_bg_to', 'color_accent', 'color_acce
 
 export default function CertificateTemplates() {
   const [templates, setTemplates] = useState([]);
+  const logoTip = useRef(null);
+  const [logoBusy, setLogoBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState(null);   // null = creating a new one
   const [form, setForm] = useState(BLANK);
@@ -133,6 +135,39 @@ export default function CertificateTemplates() {
   function startNew() {
     if (dirty && !window.confirm('Discard unsaved changes?')) return;
     setSelectedId(null); setForm({ ...BLANK }); setDirty(true);
+  }
+
+  /** Logo upload — the file lands in uploads/banners; the template stores its path. */
+  async function uploadLogo(file) {
+    if (!file || !form.id) return;
+    const body = new FormData();
+    body.append('logo', file);
+    setLogoBusy(true);
+    try {
+      const { data } = await api.post(`/admin/certificate-templates/${form.id}/logo`, body, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const path = data.data.logo_path;
+      setForm((f) => ({ ...f, logo_path: path }));
+      setTemplates((list) => list.map((t) => (t.id === form.id ? { ...t, logo_path: path } : t)));
+      flash('Logo updated — certificate aur PDF dono me lagega');
+    } catch (e) {
+      flash(e.response?.data?.error || e.message || 'Logo upload failed', 'error');
+    }
+    setLogoBusy(false);
+    if (logoTip.current) logoTip.current.value = '';
+  }
+
+  async function removeLogo() {
+    if (!form.id) return;
+    try {
+      await api.delete(`/admin/certificate-templates/${form.id}/logo`);
+      setForm((f) => ({ ...f, logo_path: null }));
+      setTemplates((list) => list.map((t) => (t.id === form.id ? { ...t, logo_path: null } : t)));
+      flash('Logo removed');
+    } catch (e) {
+      flash(e.response?.data?.error || e.message, 'error');
+    }
   }
 
   async function save(makeDefault = false) {
@@ -355,6 +390,40 @@ export default function CertificateTemplates() {
                 >{tok}
                 </button>
               ))}
+            </div>
+            <div className="panel" style={{ marginTop: 14, padding: 12 }}>
+              <div className="between" style={{ gap: 10, flexWrap: 'wrap' }}>
+                <div>
+                  <strong style={{ fontSize: 13 }}>🏛️ Logo (optional)</strong>
+                  <div className="tiny theme-muted">
+                    PNG / JPG / WebP · up to 8 MB · used on the certificate and in the PDF.
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  {form.logo_path ? (
+                    <img
+                      src={form.logo_path.startsWith('http') ? form.logo_path : `/uploads/${form.logo_path}`}
+                      alt="Template logo"
+                      style={{ height: 34, maxWidth: 140, objectFit: 'contain', background: '#fff', borderRadius: 6, padding: 3 }}
+                    />
+                  ) : (
+                    <span className="tiny theme-muted">no logo yet</span>
+                  )}
+                  <input
+                    ref={logoTip} type="file" accept="image/png,image/jpeg,image/webp"
+                    style={{ display: 'none' }}
+                    onChange={(e) => uploadLogo(e.target.files && e.target.files[0])}
+                  />
+                  <button className="btn btn-sm" type="button" disabled={logoBusy || !form.id}
+                    onClick={() => logoTip.current && logoTip.current.click()}>
+                    {logoBusy ? 'Uploading…' : (form.logo_path ? '↻ Replace' : '⬆ Upload')}
+                  </button>
+                  {form.logo_path && (
+                    <button className="btn btn-sm btn-ghost" type="button" onClick={removeLogo}>✕</button>
+                  )}
+                </div>
+              </div>
+              {!form.id && <div className="tiny theme-muted" style={{ marginTop: 6 }}>Save the template first, then upload a logo.</div>}
             </div>
             <p className="tiny theme-muted" style={{ margin: '6px 0 0' }}>
               Placeholders are replaced with the learner's real data and shown in bold. Anything else is printed as plain

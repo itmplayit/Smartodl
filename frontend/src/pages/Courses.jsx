@@ -42,6 +42,8 @@ export default function Courses() {
       <div className="section-head">
         <div><span className="eyebrow">Catalogue</span><h1>Explore courses</h1>
           <p className="muted small">Structured video lessons, notes, quizzes and coding practice for every subject.</p></div>
+        {/* heading order: cards below are h3, so the page needs an h2 level */}
+        <h2 className="sr-only">All courses</h2>
       </div>
 
       {suggested.length > 0 && (

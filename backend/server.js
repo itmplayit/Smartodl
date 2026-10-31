@@ -154,7 +154,7 @@ function dbHelp(err) {
     'Verify the DB_* settings, database service, network policy, and TLS trust.',
   ];
   if (err && err.code === 'ER_BAD_DB_ERROR') {
-    lines.push('The database is missing. Fresh install? Run database\\IMPORT-DATABASE.bat (Windows)');
+    lines.push('The database is missing. Fresh install? Import database\\education_platform.sql');
     lines.push('or import database/education_platform.sql in phpMyAdmin, then start again.');
   }
   return lines;
@@ -180,7 +180,7 @@ async function start() {
       console.error('\n  ✖ Cannot start — the database is empty (no SmartODL tables yet).\n');
       if (schema.hint) console.error(`    ${schema.hint}`);
       console.error('    Fix it with ONE of these:');
-      console.error('      Windows   : double-click  database\\IMPORT-DATABASE.bat  (XAMPP-aware, safe on first run)');
+      console.error('      Manual    : mysql -u root -p education_platform < database\\education_platform.sql');
       console.error('      CLI       : mysql -h 127.0.0.1 -u root -p < database/education_platform.sql');
       console.error('      phpMyAdmin: Import tab -> choose database/education_platform.sql');
       console.error('      Local dev : Setup.bat generates SMARTODL_ALLOW_DB_AUTOSETUP=1 and imports automatically.');

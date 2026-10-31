@@ -375,6 +375,9 @@ export const certApi = {
   mine: () => api.get('/certificates/mine'),
   verify: (token) => api.get(`/cert/${encodeURIComponent(token)}`),
   printUrl: (token) => `/api/cert/${encodeURIComponent(token)}/print`,
+  // Server-rendered A4 PDF — same file on desktop and mobile (window.print()
+  // reflows/crops on phones, which is why this exists).
+  pdfUrl: (token) => `/api/cert/${encodeURIComponent(token)}/pdf`,
   verifyUrl: (token) => `/cert/${encodeURIComponent(token)}`,
 };
 

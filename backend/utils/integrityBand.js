@@ -18,9 +18,13 @@
  */
 const { calculateIntegrityScore } = require('./integrityScore');
 
+// `tone` must match the band name (green / yellow / red). It used to be
+// 'amber' for the yellow band, which every consumer (certificate HTML, student
+// certificates, public verify page) maps as green/yellow/red — so yellow came
+// out grey. Keep tone === band.
 const BANDS = {
   green: { band: 'green', label: 'Green', tone: 'green', min: 80 },
-  yellow: { band: 'yellow', label: 'Yellow', tone: 'amber', min: 50 },
+  yellow: { band: 'yellow', label: 'Yellow', tone: 'yellow', min: 50 },
   red: { band: 'red', label: 'Red', tone: 'red', min: 0 },
 };
 const UNAVAILABLE = { band: null, label: 'Insufficient data', tone: 'muted' };

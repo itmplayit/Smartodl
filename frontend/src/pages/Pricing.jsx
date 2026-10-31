@@ -200,7 +200,10 @@ export default function Pricing() {
       {plans.length === 0 ? (
         <Empty title="No plans are currently available" hint="An administrator has made every plan inactive — please check again later." />
       ) : (
-        <div className="row wrap" style={{ gap: 16, alignItems: 'stretch', justifyContent: 'center' }}>
+        <>
+          {/* plan cards are h3 — keep the outline h1 → h2 → h3 */}
+          <h2 className="sr-only">Available plans</h2>
+          <div className="row wrap" style={{ gap: 16, alignItems: 'stretch', justifyContent: 'center' }}>
           {plans.map((p) => {
             const activeThis = myActive && Number(myActive.plan_id) === Number(p.id);
             return (
@@ -236,7 +239,8 @@ export default function Pricing() {
               </div>
             );
           })}
-        </div>
+          </div>
+        </>
       )}
 
       <Modal open={!!selected} title={selected ? `Confirm — ${selected.name}` : ''} onClose={() => setSelected(null)}>

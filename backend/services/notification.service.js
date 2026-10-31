@@ -37,7 +37,32 @@ async function roleForUser(userId, suppliedRole) {
   return row ? row.role : null;
 }
 
+/**
+ * 'certificate' is the newest type (awarded certificates now notify the
+ * student). Older databases have an ENUM without it, and MySQL silently
+ * truncates an unknown ENUM value — so the insert throws instead. Adding the
+ * value is idempotent and cheap (information_schema check first).
+ */
+const REQUIRED_TYPES = ['course', 'note', 'quiz', 'contest', 'coding', 'achievement', 'system', 'certificate'];
+let _typeEnumChecked = false;
+async function ensureNotificationTypes() {
+  if (_typeEnumChecked) return;
+  _typeEnumChecked = true;
+  try {
+    const row = await q1(
+      "SELECT COLUMN_TYPE AS t FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='notifications' AND COLUMN_NAME='type'",
+    );
+    const current = String((row && row.t) || '').toLowerCase();
+    const missing = REQUIRED_TYPES.filter((t) => !current.includes(`'${t}'`));
+    if (missing.length) {
+      await exec(`ALTER TABLE notifications MODIFY type ENUM(${REQUIRED_TYPES.map((t) => `'${t}'`).join(',')}) NOT NULL DEFAULT 'system'`);
+      console.log(`[notifications] enum extended: ${missing.join(', ')}`);
+    }
+  } catch (_) { /* table missing on a half-migrated install */ }
+}
+
 async function notify({ userId = null, audience = 'all', title, message, type = 'system', link = null, createdBy = null }) {
+  await ensureNotificationTypes();
   const res = await exec(
     `INSERT INTO notifications (user_id, audience, title, message, type, link, created_by)
      VALUES (?,?,?,?,?,?,?)`,

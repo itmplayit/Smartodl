@@ -34,6 +34,7 @@ export default function QuizzesManager({ scope = 'admin' }) {
     title: '', description: '', category_id: '', course_id: '', difficulty: 'easy', quiz_type: 'normal', negative_marking: 0,
     time_limit_minutes: 15, passing_score: 40, start_at: '', end_at: '', max_participants: '', status: 'draft',
     shuffle_questions: 0, show_answers_after: 1, allow_reattempt: 1, is_private: 0, access_password: '', module_id: '',
+    require_all_viewed: 0, individualized_order: 0,
   });
 
   const load = async () => {
@@ -83,6 +84,7 @@ export default function QuizzesManager({ scope = 'admin' }) {
       title: '', description: '', category_id: '', course_id: '', difficulty: 'easy', quiz_type: 'normal', negative_marking: 0,
       time_limit_minutes: 15, passing_score: 40, start_at: '', end_at: '', max_participants: '', status: 'draft',
       shuffle_questions: 0, show_answers_after: 1, allow_reattempt: 1, is_private: 0, access_password: '', module_id: '',
+      require_all_viewed: 0, individualized_order: 0,
     });
     setOpen(true);
   };
@@ -96,6 +98,7 @@ export default function QuizzesManager({ scope = 'admin' }) {
       passing_score: z.passing_score, start_at: z.start_at ? String(z.start_at).slice(0, 16).replace(' ', 'T') : '',
       end_at: z.end_at ? String(z.end_at).slice(0, 16).replace(' ', 'T') : '', max_participants: z.max_participants || '',
       status: z.status, shuffle_questions: z.shuffle_questions, show_answers_after: z.show_answers_after, allow_reattempt: z.allow_reattempt,
+      require_all_viewed: Number(z.require_all_viewed) || 0, individualized_order: Number(z.individualized_order) || 0,
       is_private: z.is_private ? 1 : 0, access_password: '',
     });
     setOpen(true);
@@ -244,6 +247,12 @@ export default function QuizzesManager({ scope = 'admin' }) {
                     <Link className="link" style={{ fontWeight: 600 }} to={`${base(scope)}/quizzes/${z.id}`}>{z.title}</Link>
                     {Number(z.is_private) === 1 && <span className="tag">🔒 private</span>}
                     {z.module_id && <span className="tag" title="Course page par isi module ke andar dikhta hai">📚 module quiz</span>}
+                    {Number(z.require_all_viewed) === 1 && z.quiz_type !== 'live' && (
+                      <span className="tag" title="Submit unlocks only after every question has been opened once">🔒 view-all</span>
+                    )}
+                    {Number(z.individualized_order) === 1 && z.quiz_type !== 'live' && (
+                      <span className="tag" title="Individual paper — different question order per student">🔀 personal order</span>
+                    )}
                     <div className="tiny muted">{(z.description || '').slice(0, 60)}</div>
                     <div className="tiny muted">by {scope === 'admin' ? (z.created_by_role === 'developer' ? '👨‍💻 ' : '🛡 ') : ''}{z.created_by_name || '—'}</div>
                   </td>
@@ -386,6 +395,37 @@ export default function QuizzesManager({ scope = 'admin' }) {
             <label className="field full row" style={{ gap: 10, alignItems: 'center' }}>
               <input type="checkbox" checked={Number(form.allow_reattempt) === 1} onChange={(e) => setForm((f) => ({ ...f, allow_reattempt: e.target.checked ? 1 : 0 }))} />
               Allow re-attempts
+            </label>
+            <label className="field full row" style={{ gap: 10, alignItems: 'flex-start' }}>
+              <input
+                type="checkbox"
+                style={{ marginTop: 4 }}
+                checked={form.quiz_type === 'live' || Number(form.require_all_viewed) === 1}
+                disabled={form.quiz_type === 'live'}
+                onChange={(e) => setForm((f) => ({ ...f, require_all_viewed: e.target.checked ? 1 : 0 }))}
+              />
+              <span>
+                🔒 Open every question before submit
+                <small className="tiny muted" style={{ display: 'block' }}>
+                  Live quiz me ye hamesha on hota hai. Normal/practice quiz me bhi on kar sakte hain — student
+                  Submit tab tak nahi kar sakta jab tak saare questions ek baar na khole (server bhi rokta hai).
+                </small>
+              </span>
+            </label>
+            <label className="field full row" style={{ gap: 10, alignItems: 'flex-start' }}>
+              <input
+                type="checkbox"
+                style={{ marginTop: 4 }}
+                checked={form.quiz_type === 'live' || Number(form.individualized_order) === 1}
+                disabled={form.quiz_type === 'live'}
+                onChange={(e) => setForm((f) => ({ ...f, individualized_order: e.target.checked ? 1 : 0 }))}
+              />
+              <span>
+                🔀 Personal question order (individualized paper)
+                <small className="tiny muted" style={{ display: 'block' }}>
+                  Live quiz jaisa: har student ka paper alag order me, attempt ke dauraan stable. Normal/practice quiz me bhi kaam karta hai.
+                </small>
+              </span>
             </label>
             <label className="field full row" style={{ gap: 10, alignItems: 'center' }}>
               <input type="checkbox" checked={Number(form.is_private) === 1} onChange={(e) => setForm((f) => ({ ...f, is_private: e.target.checked ? 1 : 0 }))} />

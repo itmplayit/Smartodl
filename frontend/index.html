@@ -7,21 +7,27 @@
     <link rel="apple-touch-icon" href="/icons/icon-192.png" />
     <meta name="theme-color" content="#01507c" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Inter + JetBrains Mono: declared in styles.css --sans/--mono but never loaded before.
+         Offline/LAN install? These links fail silently and the system-ui fallback kicks in. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet"
+          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" />
     <meta name="description" content="SmartODL — structured courses, study notes, live quizzes, coding practice and contests for college students." />
     <title>SmartODL — Learn. Practice. Compete.</title>
     <script>
       // Apply the saved theme BEFORE React hydrates — otherwise light-mode users
       // see a dark flash on every page load (ThemeContext sets data-theme only
-      // after mount). Keep in sync with src/context/ThemeContext.jsx (KEY).
+      // after mount). Keeps the KEY *and the default* in sync with src/context/ThemeContext.jsx.
       (function () {
         try {
           var t = localStorage.getItem('smartodl-theme');
           if (t !== 'light' && t !== 'dark') {
-            t = 'light';
+            t = 'dark'; // must match ThemeContext.readInitial() — was 'light' here, causing a flash
           }
           document.documentElement.setAttribute('data-theme', t);
           document.documentElement.style.colorScheme = t;
-        } catch (e) { /* sandboxed iframe / storage blocked → CSS defaults to light */ }
+        } catch (e) { /* sandboxed iframe / storage blocked → CSS :root default (dark) applies */ }
       })();
     </script>
   </head>

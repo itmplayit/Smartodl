@@ -67,4 +67,26 @@ function recordView(userId, lessonId) {
   });
 }
 
-module.exports = { ensureSchema, requiredDwellMs, recordView, TABLE };
+/**
+ * Decide whether a lesson may be marked complete yet.
+ *
+ * Pure on purpose: this is the rule students actually hit ("Open the lesson…",
+ * "…about 15s"), so it is unit-tested instead of only living inside a
+ * controller that needs a database.
+ *
+ * @param {object} input
+ * @param {string|Date|null} input.openedAt  the stamp, or null when never opened
+ * @param {number} input.dwellMs             required age; 0 disables the gate
+ * @param {number} [input.now]               injectable clock (tests)
+ * @returns {{allowed: boolean, reason: 'ok'|'not-opened'|'too-early', waitMs: number}}
+ */
+function dwellVerdict({ openedAt, dwellMs, now = Date.now() }) {
+  if (!dwellMs || dwellMs <= 0) return { allowed: true, reason: 'ok', waitMs: 0 };
+  if (!openedAt) return { allowed: false, reason: 'not-opened', waitMs: 0 };
+  const waited = now - new Date(openedAt).getTime();
+  if (!Number.isFinite(waited)) return { allowed: false, reason: 'not-opened', waitMs: 0 };
+  if (waited >= dwellMs) return { allowed: true, reason: 'ok', waitMs: 0 };
+  return { allowed: false, reason: 'too-early', waitMs: dwellMs - waited };
+}
+
+module.exports = { ensureSchema, requiredDwellMs, recordView, dwellVerdict, TABLE };

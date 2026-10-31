@@ -19,6 +19,9 @@ export default function CertificatesManager() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [type, setType] = useState('');
+  const [status, setStatus] = useState('all');     // all | active | revoked
+  const [from, setFrom] = useState('');            // issued-on or after
+  const [to, setTo] = useState('');                // issued-on or before
   const [search, setSearch] = useState('');
   const [toast, setToast] = useState('');
   const [tab, setTab] = useState('issued');
@@ -28,20 +31,58 @@ export default function CertificatesManager() {
     try {
       const { data: s } = await api.get('/admin/certificates/stats');
       setStats(s.data);
-      const { data } = await api.get('/admin/certificates', { params: { page, type, search, limit: 15 } });
+      const { data } = await api.get('/admin/certificates', {
+        params: { page, type, search, status, from, to, limit: 15 },
+      });
       setData(data.data);
     } catch (e) { setToast(e.response?.data?.message || e.message); }
     setLoading(false);
   }
-  useEffect(() => { if (tab === 'issued') load(); /* eslint-disable-next-line */ }, [page, type, tab]);
+  useEffect(() => { if (tab === 'issued') load(); /* eslint-disable-next-line */ }, [page, type, status, tab]);
 
   async function searchSubmit(e) { e.preventDefault(); setPage(1); await load(); }
 
-  async function revoke(id) {
-    if (!window.confirm('Revoke this certificate permanently?')) return;
-    await api.delete('/admin/certificates/' + id);
-    setToast('Certificate revoked');
-    load();
+  // A revocation is a tombstone: the row stays, the public link 410s. It used
+  // to be silent and reasonless, and impossible to undo from the UI.
+  async function revoke(c) {
+    const reason = window.prompt(
+      `Revoke ${c.certificate_no}?\n\nReason (shown in the admin list and the CSV export):`,
+      '',
+    );
+    if (reason === null) return;                       // cancelled
+    try {
+      await api.delete('/admin/certificates/' + c.id, { data: { reason: reason.trim() } });
+      setToast(reason.trim() ? 'Certificate revoked with reason' : 'Certificate revoked');
+      load();
+    } catch (e) { setToast(e.response?.data?.error || e.message); }
+  }
+
+  async function restore(c) {
+    if (!window.confirm(`Restore ${c.certificate_no}?\nThe same certificate number and public link become valid again.`)) return;
+    try {
+      await api.post('/admin/certificates/' + c.id + '/restore');
+      setToast('Certificate restored');
+      load();
+    } catch (e) { setToast(e.response?.data?.error || e.message); }
+  }
+
+  /** CSV of the current filter — the server applies the same filters as the list. */
+  function exportCsv() {
+    const params = new URLSearchParams({ type, search, status, from, to });
+    const token = localStorage.getItem('token') || localStorage.getItem('access_token') || '';
+    // The export needs the auth header, so fetch + blob instead of a bare <a href>.
+    api.get('/admin/certificates/export.csv', { params: Object.fromEntries(params), responseType: 'blob' })
+      .then((res) => {
+        const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv;charset=utf-8' }));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `certificates-${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        setToast('CSV exported');
+      })
+      .catch((e) => setToast(e.response?.data?.error || e.message || 'Export failed'));
+    void token;
   }
   async function reissue(id) {
     await api.post('/admin/certificates/' + id + '/reissue');
@@ -105,8 +146,26 @@ export default function CertificatesManager() {
             <option value="milestone">💻 Milestone</option>
             <option value="path">🛤️ Programme (legacy)</option>
           </select>
+          <select className="select" aria-label="Filter by status" value={status}
+            onChange={(e) => { setStatus(e.target.value); setPage(1); }} style={{ width: 150 }}>
+            <option value="all">All statuses</option>
+            <option value="active">✅ Active only</option>
+            <option value="revoked">🚫 Revoked only</option>
+          </select>
+          <label className="tiny muted" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            From <input className="input" type="date" value={from} onChange={(e) => setFrom(e.target.value)} style={{ width: 150 }} />
+          </label>
+          <label className="tiny muted" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            To <input className="input" type="date" value={to} onChange={(e) => setTo(e.target.value)} style={{ width: 150 }} />
+          </label>
           <button className="btn btn-primary" type="submit">Search</button>
-          {(type || search) && <button className="btn btn-ghost" type="button" onClick={() => { setType(''); setSearch(''); setPage(1); load(); }}>Clear</button>}
+          <button className="btn" type="button" onClick={exportCsv} title="Download the current filter as CSV">⬇️ CSV</button>
+          {(type || search || status !== 'all' || from || to) && (
+            <button className="btn btn-ghost" type="button"
+              onClick={() => { setType(''); setSearch(''); setStatus('all'); setFrom(''); setTo(''); setPage(1); load(); }}>
+              Clear
+            </button>
+          )}
         </form>
       </div>
 
@@ -143,13 +202,21 @@ export default function CertificatesManager() {
                     </div>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                       {c.revoked_at ? (
-                        <span className="badge" style={{ background: 'rgba(239,68,68,.15)', color: 'var(--red)', borderColor: 'rgba(239,68,68,.3)' }}>REVOKED {fd(c.revoked_at)}</span>
+                        <>
+                          <span className="badge" style={{ background: 'rgba(239,68,68,.15)', color: 'var(--red)', borderColor: 'rgba(239,68,68,.3)' }}
+                            title={c.revoke_reason || ''}>
+                            REVOKED {fd(c.revoked_at)}
+                          </span>
+                          {c.revoke_reason && <span className="tiny muted" style={{ flexBasis: '100%' }}>Reason: {c.revoke_reason}</span>}
+                          <button className="btn btn-sm btn-ghost" onClick={() => restore(c)} title="Undo the revocation">↩️ Restore</button>
+                        </>
                       ) : (
                         <>
                           <Link to={`/cert/${encodeURIComponent(c.public_token)}`} target="_blank" className="btn btn-sm btn-ghost">🔗 View</Link>
-                          <a href={`/api/cert/${encodeURIComponent(c.public_token)}/print`} target="_blank" rel="noreferrer" className="btn btn-sm btn-primary">🖨️ Print</a>
+                          <a href={`/api/cert/${encodeURIComponent(c.public_token)}/pdf`} className="btn btn-sm btn-primary">⬇️ PDF</a>
+                          <a href={`/api/cert/${encodeURIComponent(c.public_token)}/print`} target="_blank" rel="noreferrer" className="btn btn-sm btn-ghost">🖨️</a>
                           <button className="btn btn-sm btn-ghost" onClick={() => reissue(c.id)} title="Regenerate public link">🔄</button>
-                          <button className="btn btn-sm" style={{ background: 'rgba(239,68,68,.15)', color: 'var(--red)', border: '1px solid rgba(239,68,68,.3)' }} onClick={() => revoke(c.id)}>🗑 Revoke</button>
+                          <button className="btn btn-sm" style={{ background: 'rgba(239,68,68,.15)', color: 'var(--red)', border: '1px solid rgba(239,68,68,.3)' }} onClick={() => revoke(c)}>🗑 Revoke</button>
                         </>
                       )}
                     </div>

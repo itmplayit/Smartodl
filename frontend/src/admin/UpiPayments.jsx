@@ -64,7 +64,9 @@ export default function UpiPayments() {
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     upiApi.adminPreview()
-      .then(({ data: d }) => { setCfg(d.data); setCfgErr(''); })
+      // `configured: false` is a SETUP state, not an error — show the neutral
+      // panel instead of a red toast/banner on a freshly installed site.
+      .then(({ data: d }) => { setCfg(d.data); setCfgErr(d.data && d.data.configured === false ? (d.data.message || 'UPI ID is not set yet.') : ''); })
       .catch((e) => setCfgErr(e.response?.data?.error || e.message));
   }, []);
 
@@ -108,7 +110,7 @@ export default function UpiPayments() {
           ⚠️ UPI is not set up yet — {cfgErr}{' '}
           <Link to="/admin/settings">Open Website Settings</Link> and fill in the <b>Payments</b> group.
         </div>
-      ) : cfg && (
+      ) : cfg && cfg.configured !== false && cfg.qr_svg && (
         <div className="panel upi-admin-cfg" style={{ padding: 14, marginBottom: 16 }}>
           <div className="upi-admin-qr" dangerouslySetInnerHTML={{ __html: cfg.qr_svg }} />
           <div style={{ minWidth: 0 }}>

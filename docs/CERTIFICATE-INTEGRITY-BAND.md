@@ -63,3 +63,19 @@ Managed from **Admin → Feature Control → ⚖️ Student Integrity Score**:
 4. Public certificate-number lookup shows no band while `certificate_integrity_band_public` is OFF.
 5. Turning `certificate_integrity_band_enabled` OFF removes the band everywhere without touching stored certificates.
 6. Quiz → course linking does not change quiz visibility, access, scoring or existing certificates.
+
+## Colours (green / yellow / red)
+
+| Band | Score | Printed certificate (dark surface) | App card / verify page (light surface) |
+| --- | --- | --- | --- |
+| Green | ≥ 80 | `#22c55e` — 7.8:1 | `#12703a` — 5.2:1 |
+| Yellow | 50–79 | `#f59e0b` — 8.3:1 | `#a54a08` — 5.1:1 |
+| Red | < 50 | `#ef4444` — 4.7:1 | `#c81e1e` — 4.5:1 |
+| Insufficient data | no score | `#94a3b8` | `#64748b` |
+
+Ek hi source of truth: `frontend/src/utils/integrityTone.js` (tone → ink / soft tint / border / badge class).
+Backend `utils/integrityBand.js` `tone` field band ke naam ke barabar hota hai — `green`, `yellow`, `red`, `muted`.
+
+> **Bug jo fix hua:** yellow band ka tone `amber` bhej raha tha, jabki saare consumers
+> (`green` / `yellow` / `red`) hi map karte the — isliye yellow certificate **grey** dikhta tha.
+> Ab `tone === band`, aur `amber` ko alias ke roop me bhi map kiya gaya hai (purana payload bhi rangeen rahe).

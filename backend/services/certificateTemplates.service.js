@@ -111,6 +111,12 @@ const COLOR_FIELDS = [
 async function ensureSchema() {
   // Durable certificate revocation. Hard-deleting a row let the next
   // leaderboard/progress check simply mint the revoked credential again.
+  // Design binding: a certificate keeps the design it was issued with, so
+  // editing (or deleting) a template never silently restyles old credentials.
+  try {
+    await ensureColumn('certificates', 'template_id', 'ADD COLUMN template_id INT NULL AFTER enrollment_id');
+    await ensureColumn('certificates', 'design_snapshot', 'ADD COLUMN design_snapshot LONGTEXT NULL AFTER template_id');
+  } catch (_) { /* certificates table is created by the base schema */ }
   try {
     await ensureColumn('certificates', 'revoked_at', 'ADD COLUMN revoked_at DATETIME NULL AFTER title');
     await ensureColumn('certificates', 'revoked_by', 'ADD COLUMN revoked_by INT UNSIGNED NULL AFTER revoked_at');
@@ -147,6 +153,10 @@ async function ensureSchema() {
   );
 
   await ensurePathType('certificate_templates');
+  // Per-template logo (optional). Printed on the certificate and in the PDF.
+  try {
+    await ensureColumn('certificate_templates', 'logo_path', 'ADD COLUMN logo_path VARCHAR(255) NULL AFTER label');
+  } catch (_) { /* table just created above */ }
 
   const created = [];
   for (const t of BUILT_INS) {
@@ -205,6 +215,18 @@ function buildTheme(t) {
     subtitle: t.subtitle,
     recipientLine: t.recipient_line,
     label: t.label,
+    logo: t.logo_path || null,
+    templateId: t.id || null,
+    templateName: t.name || null,
+    // raw primitives — the PDF renderer cannot use CSS strings
+    pdfBgFrom: safeColor(t.color_bg_from, '#0f172a'),
+    pdfBgTo: safeColor(t.color_bg_to, '#0b1020'),
+    pdfAccent: a,
+    pdfAccent2: a2,
+    pdfAccent3: a3,
+    pdfSealFrom: safeColor(t.color_seal_from, '#fbbf24'),
+    pdfSealTo: safeColor(t.color_seal_to, '#b45309'),
+    pdfSealBorder: safeColor(t.color_seal_border, '#fde68a'),
   };
 }
 
@@ -215,24 +237,82 @@ function fallbackTheme(certType) {
 }
 
 /**
+ * The template ROW a certificate of `certType` should use: the one flagged
+ * default for that type, else any active one, else null (built-in fallback).
+ */
+async function resolveTemplateRow(certType, templateId = null) {
+  try {
+    if (templateId) {
+      const forced = await q1('SELECT * FROM certificate_templates WHERE id = ?', [templateId]);
+      if (forced) return forced;
+    }
+    return await q1(
+      `SELECT * FROM certificate_templates
+        WHERE cert_type = ? AND is_active = 1
+        ORDER BY is_default DESC, id ASC LIMIT 1`, [certType],
+    ) || null;
+  } catch (_) {
+    return null; // table missing on a half-migrated install
+  }
+}
+
+/**
  * The template a certificate of `certType` should be rendered with: the one
  * flagged default for that type, else any active one for that type, else the
  * built-in. `templateId` forces a specific row (used by the admin preview).
  */
 async function resolveTheme(certType, templateId = null) {
+  const row = await resolveTemplateRow(certType, templateId);
+  return row ? buildTheme(row) : fallbackTheme(certType);
+}
+
+/**
+ * Freeze the design at issue time.
+ *
+ * Before this, `certificates` had no reference to a template: every render
+ * resolved "whatever is the default right now". Editing a colour therefore
+ * restyled every certificate ever issued — including already-printed ones —
+ * and deleting a template silently moved old credentials to another design.
+ * The snapshot below travels with the row, so an old certificate always
+ * renders with the design it was awarded under.
+ */
+async function snapshotFor(certType, { templateId = null } = {}) {
+  const row = await resolveTemplateRow(certType, templateId);
+  if (!row) return { template_id: null, design_snapshot: null, theme: fallbackTheme(certType) };
+  return { template_id: row.id, design_snapshot: JSON.stringify(row), theme: buildTheme(row) };
+}
+
+/** Theme for an already-issued certificate: snapshot first, live lookup after. */
+async function themeForCertificate(cert) {
+  const raw = cert && cert.design_snapshot;
+  if (raw) {
+    try {
+      const snap = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (snap && snap.headline) {
+        const theme = buildTheme(snap);
+        // Exception to the freeze: the LOGO is identity, not styling. If an
+        // admin uploads or replaces a logo after issue, already-issued
+        // certificates should show it too (a wrong logo must be fixable
+        // without reissuing). The bound template is still what supplies it.
+        try {
+          const t = cert.template_id
+            ? await q1('SELECT logo_path FROM certificate_templates WHERE id = ?', [cert.template_id])
+            : null;
+          if (t) theme.logo = t.logo_path || null;
+        } catch (_) { /* keep the snapshotted logo */ }
+        return theme;
+      }
+    } catch (_) { /* corrupt snapshot → fall through to the live template */ }
+  }
+  return resolveTheme(cert && cert.cert_type);
+}
+
+/** Admin helper: how many certificates are still on the live (un-bound) design. */
+async function unboundCount() {
   try {
-    if (templateId) {
-      const forced = await q1('SELECT * FROM certificate_templates WHERE id = ?', [templateId]);
-      if (forced) return buildTheme(forced);
-    }
-    const row = await q1(
-      `SELECT * FROM certificate_templates
-        WHERE cert_type = ? AND is_active = 1
-        ORDER BY is_default DESC, id ASC LIMIT 1`, [certType],
-    );
-    if (row) return buildTheme(row);
-  } catch (_) { /* table missing on a half-migrated install */ }
-  return fallbackTheme(certType);
+    const row = await q1('SELECT COUNT(*) AS n FROM certificates WHERE design_snapshot IS NULL');
+    return Number(row.n) || 0;
+  } catch (_) { return 0; }
 }
 
 /** Only one default per certificate type. */
@@ -252,6 +332,7 @@ const SUBTITLE_TOKENS = ['student', 'title', 'score', 'grade', 'tier', 'date', '
 
 module.exports = {
   SUBTITLE_TOKENS,
-  ensureSchema, buildTheme, resolveTheme, fallbackTheme, setDefault, list,
+  ensureSchema, buildTheme, resolveTheme, resolveTemplateRow, snapshotFor,
+  themeForCertificate, unboundCount, fallbackTheme, setDefault, list,
   BUILT_INS, CERT_TYPES, TEXT_FIELDS, COLOR_FIELDS, rgba, safeColor,
 };

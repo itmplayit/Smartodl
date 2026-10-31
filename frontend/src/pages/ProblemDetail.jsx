@@ -369,7 +369,7 @@ export default function ProblemDetail() {
 
           {outTab === 'discuss' && (
             <div className="arena-scroll" style={{ padding: '14px 0' }}>
-              <Discussions parentType="problem" parentId={Number(id)} />
+              {Number.isInteger(problem?.id) ? <Discussions parentType="problem" parentId={problem.id} /> : null}
             </div>
           )}
 

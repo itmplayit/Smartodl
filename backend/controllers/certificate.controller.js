@@ -42,8 +42,91 @@ function resolveClientOrigin(res) {
   return clientOrigin();
 }
 const crypto = require('crypto');
+const QRCode = require('qrcode');
+const { buildCertificatePdf } = require('../services/certificatePdf.service');
 const certTemplates = require('../services/certificateTemplates.service');
 const certificateIntegrity = require('../services/certificateIntegrity.service');
+const notifications = require('../services/notification.service');
+const { publicUrl } = require('../middleware/upload');
+
+/**
+ * QR payload for a certificate: the public verification URL. Scanning the
+ * printed sheet opens /cert/{token} — so a paper certificate is verifiable
+ * without anyone typing a 24-character token.
+ * Returns an inline SVG (rendered inside the certificate HTML, no extra request).
+ */
+async function verifyQrSvg(verifyUrl) {
+  const svg = await QRCode.toString(verifyUrl, {
+    type: 'svg', margin: 0, errorCorrectionLevel: 'M',
+    color: { dark: '#0b1020', light: '#ffffff' },
+  });
+  // strip the XML prolog + fixed width/height so CSS can size it
+  return String(svg)
+    .replace(/<\?xml[^>]*\?>/i, '')
+    .replace(/width="[^"]*"/i, 'width="100%"')
+    .replace(/height="[^"]*"/i, 'height="100%"');
+}
+
+/** Plain-text versions of the HTML subject line / meta row, for the PDF. */
+function pdfSubject(c) {
+  const date = new Date(c.issued_at || Date.now())
+    .toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' });
+  switch (c.cert_type) {
+    case 'quiz': return `by achieving ${Number(c.score_percent || 0).toFixed(0)}% in the quiz:`;
+    case 'contest': return 'for outstanding performance in the contest:';
+    case 'milestone': return `by reaching the milestone ${tierLabel(c.tier)} on the platform.`;
+    case 'path': return 'for completing every required course in the programme:';
+    default: return 'has successfully completed all modules and lessons of the course';
+  }
+}
+function pdfMeta(c) {
+  const date = new Date(c.issued_at || Date.now())
+    .toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' });
+  switch (c.cert_type) {
+    case 'quiz':
+      return [
+        { label: 'Grade', value: c.grade },
+        { label: 'Score', value: `${Number(c.score_percent || 0).toFixed(0)}%` },
+        { label: 'Recognition', value: tierLabel(c.tier) },
+        { label: 'Issued On', value: date },
+      ];
+    case 'contest':
+      return [
+        { label: 'Grade', value: c.grade || '★' },
+        { label: 'Rank', value: tierLabel(c.tier) },
+        { label: 'Format', value: 'Live' },
+        { label: 'Issued On', value: date },
+      ];
+    case 'milestone':
+      return [
+        { label: 'Grade', value: c.grade },
+        { label: 'Milestone', value: tierLabel(c.tier) },
+        { label: 'Track', value: 'Coding' },
+        { label: 'Issued On', value: date },
+      ];
+    case 'path':
+      return [
+        { label: 'Courses', value: 'All required' },
+        { label: 'Path completion', value: '100%' },
+        { label: 'Issued On', value: date },
+      ];
+    default:
+      return [
+        { label: 'Issued On', value: date },
+        { label: 'Grade', value: c.grade },
+        { label: 'Score', value: `${Number(c.score_percent || 0).toFixed(0)}%` },
+        { label: 'Duration', value: `${Number(c.duration_hours || 0)} hrs` },
+      ];
+  }
+}
+
+/** PNG variant for the PDF renderer. */
+async function verifyQrPng(verifyUrl, width = 320) {
+  return QRCode.toBuffer(verifyUrl, {
+    type: 'png', width, margin: 1, errorCorrectionLevel: 'M',
+    color: { dark: '#0b1020', light: '#ffffff' },
+  });
+}
 
 const TYPES = {
   course:    { prefix: 'CRS', theme: 'gold',  label: 'Course Completion' },
@@ -105,6 +188,9 @@ const rankFromTier = (tier) => {
 async function _issue({ userId, certType, courseId = 0, contextId = null, enrollmentId = null, title, score = 100, tier = 'completion' }) {
   const t = TYPES[certType]; if (!t) throw new Error('unknown cert type: ' + certType);
   const safeScore = clampPercent(score);
+  // Design binding: freeze the template this certificate is awarded under, so a
+  // later template edit cannot restyle a credential that is already printed.
+  const design = await certTemplates.snapshotFor(certType);
   // One certificate per (user,type,context); milestones are distinct *by
   // tier*. Locking the user makes the check-then-insert atomic, and a later
   // better qualifying result upgrades the existing credential instead of
@@ -134,13 +220,46 @@ async function _issue({ userId, certType, courseId = 0, contextId = null, enroll
       return existing.id;
     }
     const [result] = await conn.execute(
-      `INSERT INTO certificates (user_id, course_id, context_id, cert_type, enrollment_id, certificate_no, public_token, grade, score_percent, tier, title, issued_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?, NOW())`,
+      `INSERT INTO certificates (user_id, course_id, context_id, cert_type, enrollment_id,
+         template_id, design_snapshot, certificate_no, public_token, grade, score_percent, tier, title, issued_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, NOW())`,
       [userId, courseId || null, contextId, certType, enrollmentId,
+        design.template_id, design.design_snapshot,
         genCertNo(t.prefix), genToken(), gradeOf(safeScore), safeScore, tier, title],
     );
     return result.insertId;
   });
+}
+
+/**
+ * Certificates used to appear silently: the student only found out by visiting
+ * /certificates. Every new award now also lands in the notification bell.
+ * Failures here must never break issuance, hence the try/catch.
+ */
+async function notifyIssued(certificateId) {
+  if (!certificateId) return;
+  try {
+    const row = await q1(
+      `SELECT c.id, c.user_id, c.cert_type, c.public_token,
+              COALESCE(c.title, co.title, z.title, cs.title) AS display_title
+         FROM certificates c
+         LEFT JOIN courses co ON co.id = c.course_id
+         LEFT JOIN quizzes z ON z.id = c.context_id AND c.cert_type = 'quiz'
+         LEFT JOIN contests cs ON cs.id = c.context_id AND c.cert_type = 'contest'
+        WHERE c.id = ? AND c.revoked_at IS NULL`, [certificateId],
+    );
+    if (!row) return;
+    const kind = (TYPES[row.cert_type] || {}).label || 'Certificate';
+    await notifications.notify({
+      userId: Number(row.user_id),
+      type: 'certificate',
+      title: `${kind} unlocked 🎉`,
+      message: `Your certificate for “${row.display_title || 'SmartODL'}” is ready. Download the PDF or share the verification link.`,
+      link: '/certificates',
+    });
+  } catch (err) {
+    console.warn('[certificate] notification skipped:', err.message);
+  }
 }
 
 // Public issuers — called when the relevant event happens.
@@ -150,10 +269,12 @@ async function issueIfEarned(enrollmentId) {
   const course = await q1('SELECT id, title FROM courses WHERE id = ?', [en.course_id]);
   if (!course) return null;
   const pct = Number(en.progress_percent) || 100;
-  return _issue({
+  const id = await _issue({
     userId: en.user_id, certType: 'course', courseId: course.id, enrollmentId: en.id,
     contextId: course.id, title: course.title, score: pct,
   });
+  await notifyIssued(id);
+  return id;
 }
 async function issueQuiz(attemptId) {
   const a = await q1(
@@ -170,10 +291,12 @@ async function issueQuiz(attemptId) {
   // an early submitter's temporary top_N into a permanent credential became
   // false as soon as later candidates scored higher.
   const tier = pct >= 90 ? 'excellence' : 'distinction';
-  return _issue({
+  const id = await _issue({
     userId: a.user_id, certType: 'quiz', courseId: 0, contextId: a.qid,
     title: a.qtitle, score: pct, tier,
   });
+  await notifyIssued(id);
+  return id;
 }
 async function issueContest(contestId, userId, rank) {
   const numericRank = Number(rank);
@@ -204,16 +327,20 @@ async function issueContest(contestId, userId, rank) {
   const tier = numericRank === 1 ? 'champion'
     : numericRank === 2 ? 'runner_up'
       : numericRank === 3 ? 'finalist' : `top_${numericRank}`;
-  return _issue({
+  const id = await _issue({
     userId, certType: 'contest', courseId: 0, contextId: contestId,
     title: c.title, score: pct, tier,
   });
+  await notifyIssued(id);
+  return id;
 }
 async function issueMilestone(userId, milestone, title, score = 100) {
-  return _issue({
+  const id = await _issue({
     userId, certType: 'milestone', courseId: 0, contextId: null,
     title, score, tier: milestone, // e.g. '100_problems', 'first_accept'
   });
+  await notifyIssued(id);
+  return id;
 }
 
 // ---------- endpoints ----------
@@ -336,6 +463,70 @@ function tierLabel(t) {
   return t.replace(/_/g, ' ');
 }
 
+/** Same row shape for the printable HTML and the PDF. */
+async function loadByToken(token) {
+  return q1(
+    `SELECT c.*,
+       COALESCE(c.title, co.title, z.title, cs.title) AS display_title,
+       co.title AS course_title, co.description, co.duration_hours,
+       z.title AS quiz_title, z.total_marks AS quiz_total_marks,
+       cs.title AS contest_title,
+       s.full_name AS student_name, s.email AS student_email, s.college AS student_college,
+       u.full_name AS instructor_name
+     FROM certificates c
+     LEFT JOIN courses co ON co.id = c.course_id
+     LEFT JOIN quizzes z ON z.id = c.context_id AND c.cert_type='quiz'
+     LEFT JOIN contests cs ON cs.id = c.context_id AND c.cert_type='contest'
+     JOIN users s ON s.id = c.user_id
+     LEFT JOIN users u ON u.id = co.instructor_id
+    WHERE c.public_token = ? LIMIT 1`,
+    [token],
+  );
+}
+
+/**
+ * GET /api/cert/:token/pdf — the certificate as a real A4-landscape PDF.
+ *
+ * The student page used to offer only `window.print()`; on a phone that
+ * reflows the page and often prints a cropped sheet. This returns a file the
+ * browser can save/share directly, identical on every device.
+ */
+const pdfView = asyncHandler(async (req, res) => {
+  const c = await loadByToken(req.params.token);
+  if (!c) return res.status(404).json({ success: false, error: 'Certificate not found' });
+  if (c.revoked_at) return res.status(410).json({ success: false, error: 'This certificate has been revoked' });
+
+  c.integrity = await integrityForView(c, { publicView: false });
+  const theme = await certTemplates.themeForCertificate(c);
+  const origin = resolveClientOrigin(res);
+  const verifyUrl = `${origin}/cert/${encodeURIComponent(c.public_token)}`;
+  const qrPng = await verifyQrPng(verifyUrl).catch(() => null);
+
+  const siteSettings = await q('SELECT setting_key AS k, setting_value AS v FROM settings WHERE setting_key IN (\'site_name\',\'site_tagline\')');
+  const sget = (k, d) => (siteSettings.find((r) => r.k === k) || {}).v || d;
+
+  const meta = pdfMeta(c).filter((m) => m.value);
+
+  const pdf = await buildCertificatePdf({
+    cert: c,
+    theme,
+    subject: pdfSubject(c),
+    meta,
+    integrity: c.integrity && c.integrity.shown ? c.integrity : null,
+    verifyUrl,
+    qrPng,
+    siteName: sget('site_name', 'SmartODL'),
+    tagline: sget('site_tagline', 'Learn. Practice. Compete.'),
+  });
+
+  const safeName = String(c.student_name || 'certificate').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition',
+    `attachment; filename="${safeName}-${String(c.certificate_no || 'certificate').toLowerCase()}.pdf"`);
+  res.setHeader('Cache-Control', 'private, max-age=0, no-store');
+  return res.end(pdf);
+});
+
 const printView = asyncHandler(async (req, res) => {
   const c = await q1(
     `SELECT c.*,
@@ -372,7 +563,7 @@ async function renderCertificateHtml(c, res, themeOverride = null, { preview = f
     'certificate_no', 'public_token', 'grade', 'tier'].forEach((key) => { c[key] = escapeHtml(c[key]); });
 
   const theme = themeOverride
-    || await certTemplates.resolveTheme(c.cert_type || 'course');
+    || await certTemplates.themeForCertificate(c);
   // Template wording is plain text in every position below except the
   // explicitly token-expanded subtitle, which is escaped separately.
   ['headline', 'recipientLine', 'label', 'sealText'].forEach((key) => {
@@ -384,12 +575,16 @@ async function renderCertificateHtml(c, res, themeOverride = null, { preview = f
   const tagline = escapeHtml(getS('site_tagline') || 'Learn. Code. Compete. Grow.');
   const certOrigin = resolveClientOrigin(res);
   const certificateUrl = `${certOrigin}/cert/${encodeURIComponent(rawPublicToken)}`;
+  // Printed sheets carry a QR that opens this same verification URL.
+  const qrSvg = preview ? '' : await verifyQrSvg(certificateUrl).catch(() => '');
   const issuedDate = new Date(c.issued_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' });
 
   // Integrity review band (green / yellow / red). Shown as a review indicator
   // next to the grade — it never changes the award, the grade or the score.
   const integrity = c.integrity && c.integrity.shown ? c.integrity : null;
-  const INTEGRITY_TONE = { green: '#22c55e', yellow: '#f59e0b', red: '#ef4444', muted: '#94a3b8' };
+  // green / yellow / red — 'amber' is a legacy alias kept so an older payload
+  // (or a cached certificate) still prints in colour instead of grey.
+  const INTEGRITY_TONE = { green: '#22c55e', yellow: '#f59e0b', amber: '#f59e0b', red: '#ef4444', muted: '#94a3b8' };
   const integrityTone = integrity ? (INTEGRITY_TONE[integrity.tone] || INTEGRITY_TONE.muted) : INTEGRITY_TONE.muted;
   const integrityBlock = !integrity ? '' : `
     <div class="integrity" style="border-color:${integrityTone}55;background:${integrityTone}18">
@@ -484,6 +679,12 @@ body{font-family:'Inter',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;back
 .brand-text{font-size:1.15rem;background:linear-gradient(180deg,#fff,#c8d0ff);-webkit-background-clip:text;background-clip:text;color:transparent;display:inline-flex;align-items:center;gap:6px}
 .verify{text-align:right;font-size:.78rem;color:#94a3b8;line-height:1.4}
 .verify b{color:#e2e8f0;display:block;font-size:.85rem;margin-bottom:4px;letter-spacing:.12em;text-transform:uppercase}
+.verify-wrap{display:flex;align-items:center;gap:12px;justify-content:flex-end}
+.verify-qr{width:78px;height:78px;flex:none;background:#fff;padding:5px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.35)}
+.verify-qr svg{display:block;width:100%;height:100%}
+.verify-qr-cap{font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;color:#94a3b8;margin-top:5px;text-align:center}
+.brand-logo{height:46px;width:auto;max-width:190px;object-fit:contain;filter:drop-shadow(0 4px 12px rgba(0,0,0,.35))}
+@media print{.verify-qr{box-shadow:none}}
 .verify code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:${theme.accent};background:${theme.accentSoft};padding:2px 8px;border-radius:6px;border:1px solid ${theme.accentBorder};display:inline-block;margin-top:4px;font-size:.8rem}
 .cert-body{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;position:relative;z-index:1;margin:20px 0}
 .eyebrow{font-size:.85rem;letter-spacing:.36em;text-transform:uppercase;color:${theme.eyebrow};font-weight:600;margin-bottom:10px}
@@ -531,12 +732,19 @@ ${preview ? '' : `<div class="print-controls">
 
   <div class="cert-head">
     <div class="brand">
-      <div class="brand-mark">⟨/⟩</div>
+      ${theme.logo
+        ? `<img class="brand-logo" src="${escapeHtml(/^https?:/.test(theme.logo) ? theme.logo : `/uploads/${theme.logo}`)}" alt="${escapeHtml(siteName)}" />`
+        : '<div class="brand-mark">⟨/⟩</div>'}
       <div><span>${siteName}</span><div style="font-size:.72rem;font-weight:500;color:#94a3b8;letter-spacing:.3em;text-transform:uppercase">${tagline}</div></div>
     </div>
     <div class="verify">
-      <b>Verify Certificate</b>
-      <code>${escapeHtml(certificateUrl)}</code>
+      <div class="verify-wrap">
+        <div>
+          <b>Verify Certificate</b>
+          <code>${escapeHtml(certificateUrl)}</code>
+        </div>
+        ${qrSvg ? `<div><div class="verify-qr">${qrSvg}</div><div class="verify-qr-cap">Scan to verify</div></div>` : ''}
+      </div>
     </div>
   </div>
 
@@ -573,7 +781,7 @@ ${preview ? '' : `<script nonce="${res.locals.cspNonce}">document.getElementById
 }
 
 module.exports = {
-  myCertificates, verify, printView,
+  myCertificates, verify, printView, pdfView,
   renderCertificateHtml, TYPES, tierLabel, gradeOf,
   issueIfEarned, issueQuiz, issueContest, issueMilestone,
 };

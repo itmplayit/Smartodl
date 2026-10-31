@@ -21,7 +21,12 @@ export default function Reviews({ courseId }) {
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
 
+  const validId = Number.isInteger(Number(courseId)) && Number(courseId) > 0;
+
   const load = () => {
+    // A missing/invalid id used to fire GET /api/courses/NaN/reviews on every
+    // render, filling the console with 404s. Nothing to load → say so.
+    if (!validId) { setInfo({ average: 0, count: 0, mine: null }); return; }
     communityApi.reviews(courseId)
       .then(({ data }) => {
         setInfo(data.data);
@@ -32,7 +37,7 @@ export default function Reviews({ courseId }) {
       })
       .catch((e) => setError(e.message));
   };
-  useEffect(load, [courseId]);
+  useEffect(load, [courseId, validId]); /* eslint-disable-line react-hooks/exhaustive-deps */
 
   const save = async () => {
     if (!rating) { toast.error('Select a star rating first'); return; }
