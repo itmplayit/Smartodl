@@ -9,6 +9,8 @@ test('high-frequency proctor telemetry is exempted from the per-IP budget', () =
   assert.equal(isProctorTelemetry(req('POST', '/api/quiz-attempts/12/proctor')), true);
   assert.equal(isProctorTelemetry(req('POST', '/api/quiz-attempts/12/proctor-frame')), true);
   assert.equal(isProctorTelemetry(req('POST', '/api/quiz-attempts/12/proctor-signal')), true);
+  assert.equal(isProctorTelemetry(req('POST', '/api/proctor-recordings/67aa0ea1-782c-47a0-8c67-c2429ed8acbb/camera/chunks/0')), true);
+  assert.equal(isProctorTelemetry(req('POST', '/api/proctor-recordings/67aa0ea1-782c-47a0-8c67-c2429ed8acbb/screen/chunks/12')), true);
   assert.equal(isProctorTelemetry(req('GET', '/api/quiz-attempts/12/proctor-ice')), true);
   assert.equal(isProctorTelemetry(req('GET', '/api/quiz-attempts/12/second-camera/status?x=1')), true);
   assert.equal(isProctorTelemetry(req('POST', '/api/proctor/second-camera/abc123')), true);

@@ -6,6 +6,7 @@ const TYPE_META = {
   quiz:      { icon: '📝', label: 'Quiz Excellence',   ring: '#3b82f6' },
   contest:   { icon: '🏆', label: 'Contest Champion',  ring: '#ef4444' },
   milestone: { icon: '💻', label: 'Coding Milestone',  ring: '#10b981' },
+  path:      { icon: '🛤️', label: 'Programme completion (legacy)', ring: '#8b5cf6' },
 };
 
 const TEXT_FIELDS = [

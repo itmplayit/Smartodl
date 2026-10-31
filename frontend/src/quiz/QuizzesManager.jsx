@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { quizApi, miscApi } from '../services/api';
+import { Link, useSearchParams } from 'react-router-dom';
+import { quizApi, miscApi, courseApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { useSettings } from '../context/SettingsContext';
 import { useToast } from '../context/ToastContext';
 import { DiffBadge, Empty, Loader, Modal, StatusBadge } from '../components/ui';
 import JsonImportPrompt from '../components/JsonImportPrompt';
@@ -13,9 +14,16 @@ const base = (scope) => (scope === 'admin' ? '/admin' : '/developer');
 export default function QuizzesManager({ scope = 'admin' }) {
   const toast = useToast();
   const { can, user } = useAuth();
+  const { isOn } = useSettings();
+  const moduleQuizzesOn = isOn('module_quizzes_enabled', true);
+  const [moduleOptions, setModuleOptions] = useState([]);
+  // Arriving from the modules screen: /admin/quizzes?course=1&module=2 opens the
+  // create form already linked to that module.
+  const [searchParams] = useSearchParams();
   const [rows, setRows] = useState(null);
   const [meta, setMeta] = useState(null);
   const [cats, setCats] = useState([]);
+  const [courseOptions, setCourseOptions] = useState([]);
   const [filters, setFilters] = useState({ search: '', status: '', quiz_type: '', page: 1, creator_role: '' });
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -23,9 +31,9 @@ export default function QuizzesManager({ scope = 'admin' }) {
   const [transferBusy, setTransferBusy] = useState(false);
   const importInputRef = useRef(null);
   const [form, setForm] = useState({
-    title: '', description: '', category_id: '', difficulty: 'easy', quiz_type: 'normal', negative_marking: 0,
+    title: '', description: '', category_id: '', course_id: '', difficulty: 'easy', quiz_type: 'normal', negative_marking: 0,
     time_limit_minutes: 15, passing_score: 40, start_at: '', end_at: '', max_participants: '', status: 'draft',
-    shuffle_questions: 0, show_answers_after: 1, allow_reattempt: 1, is_private: 0, access_password: '',
+    shuffle_questions: 0, show_answers_after: 1, allow_reattempt: 1, is_private: 0, access_password: '', module_id: '',
   });
 
   const load = async () => {
@@ -34,13 +42,47 @@ export default function QuizzesManager({ scope = 'admin' }) {
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [JSON.stringify(filters)]);
   useEffect(() => { miscApi.categories().then(({ data }) => setCats(data.data)).catch(() => {}); }, []);
+  useEffect(() => {
+    // Only used to link a quiz to the course whose certificate shows its
+    // integrity review band; the list is safe to fetch for staff only.
+    courseApi.list({ limit: 200, ...(scope === 'developer' ? { mine: 1 } : {}) })
+      .then(({ data }) => setCourseOptions(data.data || []))
+      .catch(() => setCourseOptions([]));
+  }, [scope]);
+
+  const prefillRef = useRef(false);
+  useEffect(() => {
+    if (prefillRef.current || !moduleQuizzesOn) return;
+    const courseFromQuery = searchParams.get('course');
+    if (!courseFromQuery) return;
+    prefillRef.current = true;
+    setEditing(null);
+    setForm((f) => ({
+      ...f,
+      course_id: courseFromQuery,
+      module_id: searchParams.get('module') || '',
+      status: 'draft',
+    }));
+    setOpen(true);
+  }, [searchParams, moduleQuizzesOn]);
+
+  // Modules of the selected course — needed for the "every module has a quiz"
+  // dropdown. A module quiz must belong to the quiz's own course.
+  useEffect(() => {
+    if (!form.course_id || !moduleQuizzesOn) { setModuleOptions([]); return undefined; }
+    let alive = true;
+    courseApi.get(form.course_id)
+      .then(({ data }) => { if (alive) setModuleOptions(data.data.modules || []); })
+      .catch(() => { if (alive) setModuleOptions([]); });
+    return () => { alive = false; };
+  }, [form.course_id, moduleQuizzesOn]);
 
   const openCreate = () => {
     setEditing(null);
     setForm({
-      title: '', description: '', category_id: '', difficulty: 'easy', quiz_type: 'normal', negative_marking: 0,
+      title: '', description: '', category_id: '', course_id: '', difficulty: 'easy', quiz_type: 'normal', negative_marking: 0,
       time_limit_minutes: 15, passing_score: 40, start_at: '', end_at: '', max_participants: '', status: 'draft',
-      shuffle_questions: 0, show_answers_after: 1, allow_reattempt: 1, is_private: 0, access_password: '',
+      shuffle_questions: 0, show_answers_after: 1, allow_reattempt: 1, is_private: 0, access_password: '', module_id: '',
     });
     setOpen(true);
   };
@@ -48,7 +90,8 @@ export default function QuizzesManager({ scope = 'admin' }) {
   const openEdit = (z) => {
     setEditing(z);
     setForm({
-      title: z.title, description: z.description || '', category_id: z.category_id || '', difficulty: z.difficulty,
+      title: z.title, description: z.description || '', category_id: z.category_id || '',
+      course_id: z.course_id || '', module_id: z.module_id || '', difficulty: z.difficulty,
       quiz_type: z.quiz_type, negative_marking: z.negative_marking, time_limit_minutes: z.time_limit_minutes,
       passing_score: z.passing_score, start_at: z.start_at ? String(z.start_at).slice(0, 16).replace(' ', 'T') : '',
       end_at: z.end_at ? String(z.end_at).slice(0, 16).replace(' ', 'T') : '', max_participants: z.max_participants || '',
@@ -67,6 +110,9 @@ export default function QuizzesManager({ scope = 'admin' }) {
         start_at: form.start_at ? form.start_at.replace('T', ' ') + ':00' : null,
         end_at: form.end_at ? form.end_at.replace('T', ' ') + ':00' : null,
         max_participants: form.max_participants || null,
+        course_id: form.course_id ? Number(form.course_id) : null,
+        // A module quiz is a normal quiz attached to one module of its course.
+        module_id: form.course_id && form.module_id ? Number(form.module_id) : null,
       };
       if (editing) await quizApi.update(editing.id, payload);
       else await quizApi.create(payload);
@@ -197,6 +243,7 @@ export default function QuizzesManager({ scope = 'admin' }) {
                   <td style={{ minWidth: 200 }}>
                     <Link className="link" style={{ fontWeight: 600 }} to={`${base(scope)}/quizzes/${z.id}`}>{z.title}</Link>
                     {Number(z.is_private) === 1 && <span className="tag">🔒 private</span>}
+                    {z.module_id && <span className="tag" title="Course page par isi module ke andar dikhta hai">📚 module quiz</span>}
                     <div className="tiny muted">{(z.description || '').slice(0, 60)}</div>
                     <div className="tiny muted">by {scope === 'admin' ? (z.created_by_role === 'developer' ? '👨‍💻 ' : '🛡 ') : ''}{z.created_by_name || '—'}</div>
                   </td>
@@ -259,6 +306,42 @@ export default function QuizzesManager({ scope = 'admin' }) {
                 {cats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </label>
+            <label className="field">Linked course (optional)
+              <select className="select" value={form.course_id} onChange={set('course_id')}>
+                <option value="">— not linked —</option>
+                {courseOptions.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
+              </select>
+              <small className="tiny muted">Course certificate ka integrity band + module quizzes isi link par chalte hain.</small>
+            </label>
+            {moduleQuizzesOn && (
+              <label className="field">Linked module — module quiz (optional)
+                <select
+                  className="select"
+                  value={form.module_id || ''}
+                  onChange={(e) => setForm((f) => ({ ...f, module_id: e.target.value }))}
+                  disabled={!form.course_id || form.quiz_type === 'live'}
+                >
+                  <option value="">— course-level quiz (koi module nahi) —</option>
+                  {moduleOptions.map((m) => {
+                    // A module can hold more than one quiz, but a teacher who
+                    // attaches a second one by accident should see it here
+                    // instead of wondering why it "doesn't show".
+                    const existing = (Array.isArray(m.quizzes) ? m.quizzes : (m.quiz ? [m.quiz] : []))
+                      .filter((z) => String(z.id) !== String(editing ? editing.id : ''));
+                    return (
+                      <option key={m.id} value={m.id}>
+                        {m.position}. {m.title}{existing.length ? `  · already has: ${existing.map((z) => z.title).join(', ')}` : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+                <small className="tiny muted">
+                  {form.quiz_type === 'live'
+                    ? 'Module quiz live nahi ho sakta — pehle quiz type normal karein.'
+                    : 'Module quiz hamesha normal quiz hota hai: anti-cheat (tab guard, fullscreen, copy-paste block) chalta hai, par webcam aur screen share kabhi nahi maange jaate. Course page par quiz usi module ke andar dikhega.'}
+                </small>
+              </label>
+            )}
             <label className="field">Difficulty
               <select className="select" value={form.difficulty} onChange={set('difficulty')}>
                 {DIFFICULTIES.map((d) => <option key={d} value={d}>{d}</option>)}

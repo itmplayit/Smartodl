@@ -10,6 +10,7 @@
 const { q, q1, exec, tx } = require('../config/db');
 const { ApiError, asyncHandler, ok, created } = require('../utils/helpers');
 const gamification = require('../services/gamification.service');
+const { refreshLeaderboard } = require('../services/points.service');
 
 const HINT_COST = (() => {
   const value = Number(process.env.HINT_COST_POINTS || 10);
@@ -101,6 +102,16 @@ const unlockHint = asyncHandler(async (req, res) => {
     await conn.query('UPDATE users SET points = GREATEST(points - ?, 0) WHERE id = ?', [HINT_COST, req.user.id]);
     return { unlocked: true, already: false, cost: HINT_COST, hints: problem.hints };
   });
+  if (!result.already) {
+    // Rebuild only after the spending transaction commits: leaderboard tables
+    // are materialized separately from users.points. A rebuild failure should
+    // not turn a successful, persisted unlock into a misleading API failure.
+    try {
+      await refreshLeaderboard();
+    } catch (error) {
+      console.error('[points] leaderboard refresh after hint unlock failed:', error.message);
+    }
+  }
   ok(res, result);
 });
 

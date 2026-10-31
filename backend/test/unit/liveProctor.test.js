@@ -43,6 +43,19 @@ test('frame freshness is per feed: a live screen cannot resurrect a dead camera'
   assert.equal(delta.screen, null, 'unchanged screen frame is not re-sent');
 });
 
+test('disabling one feed clears only that feed and releases its memory', () => {
+  live._resetForTests();
+  const now = Date.now();
+  const attempt = { id: 41, quiz_id: 7, user_id: 9 };
+  live.putFrame(attempt, 'camera', JPEG, now);
+  live.putFrame(attempt, 'screen', JPEG, now + 1);
+  live.removeFrameKinds(41, ['camera']);
+  const remaining = live.getFrames(41, now + 2);
+  assert.equal(remaining.camera, undefined);
+  assert.equal(remaining.screen.image, JPEG);
+  assert.equal(live.stats(now + 2).frame_bytes, JPEG.length);
+});
+
 test('second-camera pairing is attempt-bound and reports connection freshness', () => {
   live._resetForTests();
   const now = Date.now();
@@ -56,6 +69,13 @@ test('second-camera pairing is attempt-bound and reports connection freshness', 
   assert.equal(live.secondCameraStatus(100, now + 3000).connected, true);
   assert.equal(live.secondCameraStatus(100, now + 40 * 1000).connected, false);
   assert.equal(live.secondCameraStatus(100, now + 40 * 1000).ever_connected, true);
+  assert.equal(Object.hasOwn(live.secondCameraStatus(100, now + 3000), 'token'), false,
+    'status polling must never expose the phone upload bearer token');
+
+  // Feature withdrawal invalidates the existing bearer link.
+  live.removeSecondCameraSessions(100);
+  assert.equal(live.getSecondCameraSession(first.token, now + 4000), null);
+  assert.equal(live.getFrames(100, now + 4000), null, 'withdrawal clears the cached phone frame too');
 
   // Rotating the pairing code kills the old token immediately.
   const rotated = live.createSecondCameraSession(attempt, now + 50 * 1000, { rotate: true });

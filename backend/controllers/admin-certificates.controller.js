@@ -12,7 +12,7 @@ const listAll = asyncHandler(async (req, res) => {
   const off = (p - 1) * l;
   const params = [];
   let where = 'WHERE 1=1';
-  if (type && ['course', 'quiz', 'contest', 'milestone'].includes(type)) {
+  if (type && ['course', 'quiz', 'contest', 'milestone', 'path'].includes(type)) {
     where += ' AND c.cert_type = ?'; params.push(type);
   }
   if (search && search.trim()) {

@@ -78,6 +78,8 @@ const AIGenerator = lazy(() => import('../admin/AIGenerator'));
 const CertificatesManager = lazy(() => import('../admin/CertificatesManager'));
 const Plagiarism = lazy(() => import('../admin/Plagiarism'));
 const FeatureControl = lazy(() => import('../admin/FeatureControl'));
+const ProctorRecordings = lazy(() => import('../admin/ProctorRecordings'));
+const IntegrityScores = lazy(() => import('../admin/IntegrityScores'));
 const ProctorTest = lazy(() => import('../admin/ProctorTest'));
 import FeatureGate from '../components/FeatureGate';
 
@@ -217,6 +219,8 @@ export default function AppRoutes() {
         <Route path="landing-builder" element={<LandingBuilder />} />
         <Route path="settings" element={<SettingsManager />} />
         <Route path="features" element={<FeatureControl />} />
+        <Route path="integrity-scores" element={<IntegrityScores />} />
+        <Route path="proctor-recordings" element={<ProctorRecordings />} />
         <Route path="proctor-test" element={<ProctorTest />} />
         <Route path="certificates" element={<CertificatesManager />} />
         <Route path="ai" element={<AIGenerator />} />

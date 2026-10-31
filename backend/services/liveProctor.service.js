@@ -75,6 +75,23 @@ function deleteFrameBundle(attemptId) {
   frames.delete(key);
 }
 
+function removeFrameKinds(attemptId, kinds = []) {
+  const key = keyOf(attemptId);
+  const bundle = frames.get(key);
+  if (!bundle) return;
+  for (const kind of kinds) {
+    if (!FRAME_KINDS.has(kind) || !bundle[kind]) continue;
+    frameBytes = Math.max(0, frameBytes - frameLength(bundle[kind]));
+    delete bundle[kind];
+  }
+  if (!bundleBytes(bundle)) frames.delete(key);
+  else {
+    const newest = Array.from(FRAME_KINDS)
+      .reduce((at, kind) => Math.max(at, Number((bundle[kind] && bundle[kind].at) || 0)), 0);
+    bundle.updatedAt = newest;
+  }
+}
+
 function evictFrames() {
   while (frames.size > MAX_FRAME_ATTEMPTS || frameBytes > MAX_FRAME_BYTES) {
     const oldest = frames.keys().next().value;
@@ -196,11 +213,16 @@ function framesForQuiz(quizId, now = Date.now(), { since = 0 } = {}) {
   return out;
 }
 
-function removeAttempt(attemptId) {
-  deleteFrameBundle(attemptId);
+function removeSecondCameraSessions(attemptId) {
   for (const [token, session] of secondSessions.entries()) {
     if (keyOf(session.attemptId) === keyOf(attemptId)) secondSessions.delete(token);
   }
+  removeFrameKinds(attemptId, ['second_camera']);
+}
+
+function removeAttempt(attemptId) {
+  deleteFrameBundle(attemptId);
+  removeSecondCameraSessions(attemptId);
 }
 
 function publicSecondSession(session, now = Date.now()) {
@@ -274,12 +296,15 @@ function putSecondCameraFrame(token, image, now = Date.now()) {
 
 function secondCameraStatus(attemptId, now = Date.now()) {
   const session = findSecondSessionByAttempt(attemptId, now);
-  return publicSecondSession(session, now) || {
-    token: null,
-    connected: false,
-    ever_connected: false,
-    last_frame_at: null,
-  };
+  const status = publicSecondSession(session, now);
+  if (status) {
+    // The token is a bearer credential for an unauthenticated camera upload.
+    // Return it only once to the student creating the pairing link, never in
+    // polling/status payloads visible to hosts or quiz participants.
+    delete status.token;
+    return status;
+  }
+  return { connected: false, ever_connected: false, last_frame_at: null };
 }
 
 function registerViewer(sessionId, hostUserId, quizId, now = Date.now(), attemptId = null) {
@@ -362,7 +387,9 @@ module.exports = {
   putFrame,
   getFrames,
   framesForQuiz,
+  removeFrameKinds,
   removeAttempt,
+  removeSecondCameraSessions,
   createSecondCameraSession,
   getSecondCameraSession,
   putSecondCameraFrame,

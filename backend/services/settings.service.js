@@ -1,6 +1,6 @@
 'use strict';
 /** Website settings stored in the DB — the admin panel changes these live, no code edits. */
-const { q, exec } = require('../config/db');
+const { q, tx } = require('../config/db');
 const { ApiError } = require('../utils/helpers');
 const { parseIceServers } = require('./iceServers.service');
 
@@ -53,6 +53,24 @@ function cleanSettingValue(key, raw, setting) {
   }
   if (setting.input_type === 'boolean' && !['0', '1', 'true', 'false', 'yes', 'no', 'on', 'off'].includes(value.toLowerCase())) throw ApiError.badRequest(`${key} must be a boolean value`);
   if (setting.input_type === 'number' && (!value || !Number.isFinite(Number(value)))) throw ApiError.badRequest(`${key} must be a number`);
+  if (key === 'proctor_recording_retention_days') {
+    const days = Number(value);
+    if (!Number.isInteger(days) || days < 1 || days > 3650) {
+      throw ApiError.badRequest('Recording retention must be a whole number from 1 to 3650 days');
+    }
+  }
+  if (key === 'certificate_integrity_scope') {
+    if (!['course', 'overall'].includes(String(value))) {
+      throw ApiError.badRequest('Certificate integrity scope must be course or overall');
+    }
+    return String(value);
+  }
+  if (['integrity_score_tab_switch_penalty', 'integrity_score_proctor_violation_penalty'].includes(key)) {
+    const points = Number(value);
+    if (!Number.isInteger(points) || points < 0 || points > 100) {
+      throw ApiError.badRequest('Integrity score penalties must be whole numbers from 0 to 100');
+    }
+  }
   return value;
 }
 
@@ -73,11 +91,21 @@ async function updateSettings(map, userId) {
   const known = await loadSettings();
   const unknown = keys.filter((key) => !known[key] || !/^[a-z][a-z0-9_]{0,79}$/.test(key));
   if (unknown.length) throw ApiError.badRequest(`Unknown setting key: ${unknown[0]}`);
-  for (const key of keys) {
-    // A returned masked value means the administrator did not modify the field.
-    if (SECRET_KEYS.has(key) && String(map[key] || '') === SECRET_MASK) continue;
-    const clean = cleanSettingValue(key, map[key], known[key]);
-    await exec('UPDATE settings SET setting_value = ?, updated_by = ? WHERE setting_key = ?', [clean, userId || null, key]);
+  const changes = keys
+    .filter((key) => !(SECRET_KEYS.has(key) && String(map[key] || '') === SECRET_MASK))
+    .map((key) => [key, cleanSettingValue(key, map[key], known[key])]);
+  // Admin forms may submit a coordinated group of switches (notably the
+  // Advanced Proctoring master button). Commit the patch atomically so a DB
+  // error cannot leave a half-enabled policy behind.
+  if (changes.length) {
+    await tx(async (conn) => {
+      for (const [key, value] of changes) {
+        await conn.execute(
+          'UPDATE settings SET setting_value = ?, updated_by = ? WHERE setting_key = ?',
+          [value, userId || null, key],
+        );
+      }
+    });
   }
   await loadSettings(true);
   return loadSettings();

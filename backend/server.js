@@ -142,7 +142,10 @@ app.use(notFound);
 app.use(errorHandler);
 
 const PORT = Number(process.env.PORT || 5000);
-const HOST = process.env.HOST || '0.0.0.0';
+// Bind the API to this machine by default. The Vite dev-server proxy uses
+// 127.0.0.1, so LAN-shared frontend access does not require exposing the API.
+// Set HOST=0.0.0.0 explicitly only when direct network API access is needed.
+const HOST = process.env.HOST || '127.0.0.1';
 
 /** Return a concise startup diagnosis without printing credentials. */
 function dbHelp(err) {
@@ -212,9 +215,12 @@ async function start() {
       if (check.ok) {
         console.log('[migrations] critical schema verified (all migration-owned tables/columns present)');
       } else {
-        console.error(`[migrations] critical schema is INCOMPLETE — missing: ${check.missing.join(', ')}`);
+        console.error(`[migrations] critical schema/settings are INCOMPLETE — missing: ${check.missing.join(', ')}`);
         console.error('[migrations] run `npm run migrate` with a privileged database account, then start again.');
-        if (process.env.NODE_ENV === 'production') process.exit(1);
+        // Missing feature-setting rows directly break admin controls at save
+        // time. Do not leave a development API running in that known-broken
+        // state just because this deployment intentionally skipped writes.
+        if (process.env.NODE_ENV === 'production' || check.missing.some((item) => item.startsWith('settings.'))) process.exit(1);
       }
     } catch (err) {
       console.error('[migrations] critical schema could not be verified:', err.message);
@@ -225,48 +231,20 @@ async function start() {
     const result = await runMigrations();
     if (result.failed.length) {
       console.error(`[migrations] ${result.failed.length} upgrade(s) FAILED: ${result.failed.join(', ')}`);
-      if (process.env.NODE_ENV === 'production') {
-        console.error('[migrations] refusing to start on a half-upgraded schema. Fix the cause above, or run `npm run migrate` as a privileged deploy step and set SMARTODL_SKIP_MIGRATIONS=1.');
+      if (process.env.NODE_ENV === 'production' || result.failed.includes('flags')) {
+        console.error('[migrations] refusing to start with a failed critical schema/feature-settings upgrade. Fix the cause above, or run `npm run migrate` as a privileged deploy step and set SMARTODL_SKIP_MIGRATIONS=1.');
         process.exit(1);
       }
     } else {
       console.log(`[migrations] ${result.ran.length} runtime upgrades applied/verified`);
     }
   }
-  // Housekeeping: attempts left in_progress for over a day (browser closed,
-  // network gone) used to be flat-marked 'abandoned', silently throwing away
-  // answers the student had actually saved. They are now GRADED from whatever
-  // was stored (that is what a late submit would do), and only attempts that
-  // cannot be graded at all fall back to 'abandoned'. Hourly, unref'd so
-  // tests can exit.
-  const sweepAbandonedAttempts = async () => {
-    try {
-      const { q, exec } = require('./config/db');
-      const { evaluateAttempt } = require('./controllers/quiz.controller');
-      const stale = await q(
-        `SELECT qa.id, q.status AS quiz_status, q.end_at, q.time_limit_minutes
-           FROM quiz_attempts qa JOIN quizzes q ON q.id = qa.quiz_id
-          WHERE qa.status = 'in_progress' AND qa.started_at < (NOW() - INTERVAL 24 HOUR)
-          LIMIT 200`,
-      );
-      let graded = 0, abandoned = 0;
-      for (const a of stale) {
-        // A live session that is genuinely still open must not be graded
-        // behind the host's back — leave it for endLive to handle.
-        if (a.quiz_status === 'live' && !(a.end_at && new Date(a.end_at).getTime() < Date.now())) continue;
-        try {
-          await evaluateAttempt(a.id);
-          graded += 1;
-        } catch (err) {
-          await exec("UPDATE quiz_attempts SET status = 'abandoned' WHERE id = ? AND status = 'in_progress'", [a.id])
-            .catch(() => {});
-          abandoned += 1;
-        }
-      }
-      if (graded || abandoned) console.log(`[housekeeping] stale attempts: ${graded} graded from saved answers, ${abandoned} abandoned`);
-    } catch (err) { console.warn('[housekeeping] attempt sweep failed:', err.message); }
-  };
-  setInterval(sweepAbandonedAttempts, 60 * 60 * 1000).unref();
+  // Housekeeping: attempts left in_progress (browser closed, network gone) are
+  // settled by services/quizAttempts.service.js — graded from whatever was saved,
+  // and only marked 'abandoned' when they cannot be graded at all. It now runs
+  // shortly after the quiz deadline instead of waiting a full day, so the course
+  // page stops showing "in_progress" for a paper that is over.
+  require('./services/quizAttempts.service').startAttemptSweeper();
   app.listen(PORT, HOST, () => {
     console.log(`[api] SmartODL API listening on http://${HOST}:${PORT}`);
     if (String(process.env.DEV_SHOW_RESET_LINK || '').trim().toLowerCase() === 'true'

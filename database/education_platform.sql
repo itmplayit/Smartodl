@@ -1,8 +1,8 @@
 
 
-CREATE DATABASE /*!32312 IF NOT EXISTS*/ `edu` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci */;
+CREATE DATABASE /*!32312 IF NOT EXISTS*/ `education_platform` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci */;
 
-USE `edu`;
+USE `education_platform`;
 -- Tables later in this dump are referenced by foreign keys from earlier ones
 -- (alphabetical order), so checks must be off during creation. These header
 -- lines (which only save the session values the footer restores) had been
@@ -75,7 +75,7 @@ CREATE TABLE `certificates` (
   `course_id` int(10) unsigned DEFAULT NULL,
   `context_id` int(10) unsigned DEFAULT NULL,
   `enrollment_id` int(10) unsigned DEFAULT NULL,
-  `cert_type` enum('course','quiz','contest','milestone') NOT NULL DEFAULT 'course',
+  `cert_type` enum('course','quiz','contest','milestone','path') NOT NULL DEFAULT 'course',
   `certificate_no` varchar(32) NOT NULL,
   `public_token` varchar(40) NOT NULL,
   `grade` varchar(6) DEFAULT 'A',
@@ -103,7 +103,7 @@ CREATE TABLE `certificate_templates` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `slug` varchar(60) NOT NULL,
   `name` varchar(120) NOT NULL,
-  `cert_type` enum('course','quiz','contest','milestone') NOT NULL DEFAULT 'course',
+  `cert_type` enum('course','quiz','contest','milestone','path') NOT NULL DEFAULT 'course',
   `headline` varchar(120) NOT NULL DEFAULT 'Certificate of Completion',
   `subtitle` varchar(255) NOT NULL DEFAULT '',
   `recipient_line` varchar(60) NOT NULL DEFAULT 'Awarded to',
@@ -913,6 +913,7 @@ CREATE TABLE `quizzes` (
   `slug` varchar(220) NOT NULL,
   `description` text DEFAULT NULL,
   `category_id` int(10) unsigned DEFAULT NULL,
+  `course_id` int(10) unsigned DEFAULT NULL,
   `difficulty` enum('easy','medium','hard') NOT NULL DEFAULT 'easy',
   `quiz_type` enum('normal','live','practice') NOT NULL DEFAULT 'normal',
   `total_marks` int(10) unsigned NOT NULL DEFAULT 0,
@@ -940,6 +941,7 @@ CREATE TABLE `quizzes` (
   UNIQUE KEY `uq_quizzes_slug` (`slug`),
   KEY `idx_quizzes_status` (`status`),
   KEY `idx_quizzes_type` (`quiz_type`),
+  KEY `idx_quizzes_course` (`course_id`),
   KEY `fk_quizzes_category` (`category_id`),
   KEY `fk_quizzes_creator` (`created_by`),
   CONSTRAINT `fk_quizzes_category` FOREIGN KEY (`category_id`) REFERENCES `categories` (`id`) ON DELETE SET NULL,

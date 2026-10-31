@@ -52,19 +52,23 @@ const DEFAULT_ICE_SERVERS = [
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
 const DEFAULT_FRAME_TTL = { camera: 25000, screen: 45000, second_camera: 30000 };
+const formatBytes = (value) => {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+};
 const parsePolicy = (value) => {
   if (!value) return null;
   if (typeof value === 'object') return value;
   try { return JSON.parse(value); } catch (_) { return null; }
 };
-/**
- * Whether THIS attempt's frozen policy includes an advanced feature.
- * Legacy participants without a snapshot fall back to the global switch
- * (the caller passes it as `fallback`) so old rows keep working.
- */
-const policyAllows = (participant, key, fallback = true) => {
+/** Whether THIS attempt's frozen policy includes an advanced feature. */
+const policyAllows = (participant, key) => {
   const policy = parsePolicy(participant && participant.proctor_policy);
-  if (!policy) return fallback;
+  // Advanced transports fail closed when a legacy attempt has no snapshot;
+  // this mirrors the backend and avoids UI retry loops that can never connect.
+  if (!policy) return false;
   return !!(policy.live && policy.advanced && policy.advanced[key]);
 };
 
@@ -78,6 +82,7 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
   const secondEnabled = adv('proctor_second_camera_enabled');
   const identityEnabled = adv('proctor_identity_check_enabled');
   const warningsEnabled = adv('proctor_live_warnings_enabled');
+  const recordingEnabled = isOn('proctor_recording_enabled', false);
 
   const [mode, setMode] = useState('snapshot');
   const [frames, setFrames] = useState({});
@@ -87,6 +92,8 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
   const [selectedId, setSelectedId] = useState(null);
   const [warningText, setWarningText] = useState('Please remain seated, visible on camera, and look only at the quiz screen.');
   const [actionBusy, setActionBusy] = useState('');
+  const [recordingStatus, setRecordingStatus] = useState(null);
+  const [recordingBusy, setRecordingBusy] = useState(false);
   const [monitorError, setMonitorError] = useState('');
   const [frameTtl, setFrameTtl] = useState(DEFAULT_FRAME_TTL);
   const [frameNow, setFrameNow] = useState(() => Date.now());
@@ -110,7 +117,7 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
     [participants],
   );
   const runningWebrtcParticipants = useMemo(
-    () => runningParticipants.filter((p) => policyAllows(p, 'webrtc', true)),
+    () => runningParticipants.filter((p) => policyAllows(p, 'webrtc')),
     [runningParticipants],
   );
   const runningWebrtcRef = useRef([]);
@@ -125,6 +132,17 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
   useEffect(() => {
     if (!selectedId && runningParticipants[0]) setSelectedId(runningParticipants[0].id);
   }, [selectedId, runningParticipants]);
+
+  useEffect(() => {
+    if (!selectedId) { setRecordingStatus(null); return undefined; }
+    let live = true;
+    const loadRecording = () => quizApi.proctorRecordingStatus(selectedId)
+      .then(({ data }) => { if (live) setRecordingStatus(data.data || null); })
+      .catch(() => { if (live) setRecordingStatus(null); });
+    loadRecording();
+    const timer = setInterval(loadRecording, 4000);
+    return () => { live = false; clearInterval(timer); };
+  }, [selectedId]);
 
   useEffect(() => {
     if (snapshotEnabled) setMode((m) => (m === 'webrtc' && webrtcEnabled ? m : 'snapshot'));
@@ -208,6 +226,38 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
     if (!at || frameNow - at > ttl) return null;
     return frame;
   }, [frameTtl, frameNow]);
+
+  useEffect(() => {
+    setFrames((prev) => {
+      const next = {};
+      Object.entries(prev).forEach(([attemptId, entry]) => {
+        const clean = { ...entry };
+        if (!snapshotEnabled) { delete clean.camera; delete clean.screen; }
+        if (!secondEnabled) delete clean.second_camera;
+        if (clean.camera || clean.screen || clean.second_camera) next[attemptId] = clean;
+      });
+      return next;
+    });
+  }, [snapshotEnabled, secondEnabled]);
+
+  useEffect(() => {
+    const closed = new Set(participants
+      .filter((participant) => participant.status !== 'in_progress')
+      .map((participant) => String(participant.id)));
+    if (!closed.size) return;
+    setFrames((prev) => {
+      if (![...closed].some((attemptId) => prev[attemptId])) return prev;
+      const next = { ...prev };
+      closed.forEach((attemptId) => { delete next[attemptId]; });
+      return next;
+    });
+    setStreams((prev) => {
+      if (![...closed].some((attemptId) => prev[attemptId])) return prev;
+      const next = { ...prev };
+      closed.forEach((attemptId) => { delete next[attemptId]; });
+      return next;
+    });
+  }, [participants]);
 
   const sendSignal = useCallback((attemptId, payload) => quizApi.proctorSignal(attemptId, {
     session_id: sessionIdRef.current,
@@ -444,8 +494,25 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
     } finally { setActionBusy(''); }
   };
 
-  const verifyIdentity = async () => {
+  const controlRecording = async (action) => {
     if (!selected) return;
+    if (action === 'recording_start' && !window.confirm(`Request explicit webcam and screen recording consent from ${selected.full_name}? Nothing starts until the student allows it.`)) return;
+    setRecordingBusy(true);
+    try {
+      const { data } = await quizApi.proctorAction(selected.id, { action });
+      setRecordingStatus({ ...(recordingStatus || {}), ...(data.data || {}) });
+      toast.success(action === 'recording_start'
+        ? `Recording request sent to ${selected.full_name}; awaiting their consent.`
+        : `Recording stop requested for ${selected.full_name}.`);
+    } catch (e) { toast.error(e.message); }
+    finally { setRecordingBusy(false); }
+  };
+
+  const verifyIdentity = async () => {
+    if (!selected || !identityFeedAvailable || !identityLiveViewConfigured) {
+      toast.info('A live camera feed is required before visual identity verification.');
+      return;
+    }
     setActionBusy('identity');
     try {
       await quizApi.proctorAction(selected.id, { action: 'verify_identity' });
@@ -455,7 +522,7 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
     } finally { setActionBusy(''); }
   };
 
-  if (!master || !(snapshotEnabled || webrtcEnabled || secondEnabled || warningsEnabled || identityEnabled)) {
+  if ((!master || !(snapshotEnabled || webrtcEnabled || secondEnabled || warningsEnabled || identityEnabled)) && !recordingEnabled) {
     return null;
   }
 
@@ -464,17 +531,26 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
   const selectedSecond = selected ? (secondStatuses[String(selected.id)] || {}) : {};
   const selectedFlags = flagsOf(selected);
   const identityVerified = selectedFlags.includes('identity_verified');
-  const selectedSecondAllowed = secondEnabled && policyAllows(selected, 'second_camera', true);
-  const selectedIdentityAllowed = identityEnabled && policyAllows(selected, 'identity', true);
-  const selectedWarningsAllowed = warningsEnabled && policyAllows(selected, 'warnings', true);
+  const selectedSecondAllowed = secondEnabled && policyAllows(selected, 'second_camera');
+  const selectedIdentityAllowed = identityEnabled && policyAllows(selected, 'identity');
+  const identityLiveViewConfigured = snapshotEnabled || webrtcEnabled;
+  const identityFeedAvailable = !!(selected && selected.status === 'in_progress' && (
+    (snapshotEnabled && freshFrame(selectedFrames.camera, 'camera'))
+    || (webrtcEnabled && selectedStreams.camera)
+  ));
+  const selectedWarningsAllowed = warningsEnabled && policyAllows(selected, 'warnings');
+  const selectedRecordingAllowed = recordingEnabled && policyAllows(selected, 'recording');
+  const selectedFrozenPolicy = selected ? parsePolicy(selected.proctor_policy) : null;
+  const recordingPolicyBlocked = recordingEnabled && !!selected && selected.status === 'in_progress' && !selectedRecordingAllowed;
+  const recordingActive = recordingStatus && ['requested', 'recording', 'stopping'].includes(recordingStatus.status);
 
   const renderFeed = (participant, kind, height = 150) => {
     const frame = frames[String(participant.id)] || {};
     const liveStreams = streams[String(participant.id)] || {};
-    if (mode === 'webrtc' && liveStreams[kind]) {
+    if (webrtcEnabled && mode === 'webrtc' && liveStreams[kind]) {
       return <LiveVideo stream={liveStreams[kind]} label={`${participant.full_name} ${kind}`} />;
     }
-    const fresh = freshFrame(frame[kind], kind);
+    const fresh = snapshotEnabled ? freshFrame(frame[kind], kind) : null;
     if (fresh) {
       return (
         <img
@@ -506,7 +582,7 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
         <div>
           <h3 style={{ margin: 0 }}>🔴 Live Proctor Monitor</h3>
           <div className="tiny muted">
-            Live-only authorised view. No photo, video or screen recording is saved.
+            Live feeds are not saved. Host-requested recordings are a separate feature, always require student consent, and are stored privately for admin-only playback.
           </div>
         </div>
         <div className="row wrap" style={{ gap: 6 }}>
@@ -530,6 +606,19 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
           <span>Students are still in the lobby. Live feeds begin after “Start for everyone” and each student grants permission.</span>
         </div>
       )}
+      {recordingEnabled && active && runningParticipants.length === 0 && (
+        <div className="soft small mb-s" role="status">
+          ⏺ Request recording appears only after a student has opened the live paper and their attempt is <strong>running</strong>.
+        </div>
+      )}
+      {recordingPolicyBlocked && (
+        <div className="soft small mb-s" role="status">
+          ⏺ No Request recording button for {selected.full_name}: this attempt’s frozen proctor policy
+          {selectedFrozenPolicy?.live && selectedFrozenPolicy?.advanced?.recording
+            ? ' does not currently match the active recording setting.'
+            : ' does not include saved recording. Enable Saved Proctor Recordings first, then start a new student attempt; running attempts cannot gain recording retroactively.'}
+        </div>
+      )}
 
       {participants.length === 0 ? (
         <div className="tiny muted">No participants to monitor yet.</div>
@@ -543,7 +632,7 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
               const isSelected = selected && String(p.id) === String(selected.id);
               const second = secondStatuses[String(p.id)] || {};
               const f = frames[String(p.id)] || {};
-              const secondAllowed = secondEnabled && policyAllows(p, 'second_camera', true);
+              const secondAllowed = secondEnabled && policyAllows(p, 'second_camera');
               const freshSecond = freshFrame(f.second_camera, 'second_camera');
               const flags = flagsOf(p);
               return (
@@ -614,18 +703,46 @@ export default function LiveProctorMonitor({ quizId, participants = [], active =
                   {mode === 'webrtc' && (
                     <button type="button" className="btn btn-sm" onClick={reconnectSelected}>↻ Reconnect</button>
                   )}
-                  {selectedIdentityAllowed && (
+                  {selectedIdentityAllowed && identityLiveViewConfigured && (
                     <button
                       type="button"
                       className="btn btn-sm"
                       onClick={verifyIdentity}
-                      disabled={actionBusy === 'identity' || identityVerified}
+                      disabled={actionBusy === 'identity' || identityVerified || !identityFeedAvailable}
+                      title={identityFeedAvailable ? 'Verify only after visually comparing the student and institute ID in the live camera feed.' : 'A fresh live camera feed is required before visual verification.'}
                     >
-                      {identityVerified ? '✓ Identity verified' : '🪪 Verify identity'}
+                      {identityVerified ? '✓ Identity verified' : identityFeedAvailable ? '🪪 Verify identity' : 'Waiting for live camera'}
                     </button>
+                  )}
+                  {selectedRecordingAllowed && selected.status === 'in_progress' && (
+                    <>
+                      <span
+                        className={`badge ${recordingActive ? 'amber' : 'muted'}`}
+                        title={recordingStatus?.files?.length
+                          ? `Uploaded to private server storage — webcam ${formatBytes(recordingStatus.files.find((file) => file.feed === 'camera')?.byte_size)}; screen ${formatBytes(recordingStatus.files.find((file) => file.feed === 'screen')?.byte_size)}`
+                          : 'No recording chunks uploaded yet'}
+                      >
+                        {recordingStatus?.status
+                          ? `⏺ ${recordingStatus.status}${Number(recordingStatus.total_bytes) > 0 ? ` · ${formatBytes(recordingStatus.total_bytes)}` : ''}`
+                          : '⏺ not started'}
+                      </span>
+                      {recordingActive
+                        ? <button type="button" className="btn btn-sm" disabled={recordingBusy || recordingStatus.status === 'stopping'} onClick={() => controlRecording('recording_stop')}>⏹ Stop recording</button>
+                        : <button type="button" className="btn btn-sm btn-primary" disabled={recordingBusy} onClick={() => controlRecording('recording_start')}>⏺ Request recording</button>}
+                    </>
                   )}
                 </div>
               </div>
+              {selectedIdentityAllowed && !identityLiveViewConfigured && (
+                <div className="tiny muted" style={{ margin: '8px 0' }}>
+                  Student self-check only: live camera view is not enabled, so visual host verification is unavailable.
+                </div>
+              )}
+              {selectedIdentityAllowed && identityLiveViewConfigured && !identityFeedAvailable && !identityVerified && (
+                <div className="tiny muted" style={{ margin: '8px 0' }}>
+                  Visual verification is unavailable until a fresh camera feed is visible. In WebRTC mode, connect the selected student first.
+                </div>
+              )}
 
               <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
                 <figure style={{ margin: 0 }}>

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "install:all": "cd frontend && npm ci && cd ../backend && npm ci && cd judge-service && npm ci",
-    "build": "cd frontend && npm run build"
+    "build": "cd frontend && npm run build",
+    "dev:lan": "npm --prefix frontend run dev:lan"
   }
 }

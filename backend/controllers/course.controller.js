@@ -7,6 +7,16 @@ const { publicUrl } = require('../middleware/upload');
 const { notify } = require('../services/notification.service');
 const subs = require('../services/subscription.service');
 const lessonOpens = require('../services/lessonOpens.service');
+const { assertLessonAccess } = require('../services/lessonAccess.service');
+const lessonWatch = require('../services/lessonWatch.service');
+const {
+  evaluateCompletion, normalisePolicy, requiresQuiz, requiredQuizForModule, POLICIES, POLICY_LABELS,
+} = require('../utils/completionPolicy');
+const moduleQuiz = require('../services/moduleQuiz.service');
+const lessonMedia = require('../services/lessonMedia.service');
+const { summarizeCourseAnalytics, describeCourseHealth } = require('../utils/courseInsights');
+const { recommendCourses, skillTokens } = require('../utils/recommendations');
+const { buildXlsx } = require('../utils/xlsx');
 
 const COURSE_STATUSES = ['draft', 'published', 'unpublished'];
 const COURSE_DIFFICULTIES = ['beginner', 'intermediate', 'advanced'];
@@ -173,10 +183,262 @@ const getCourse = asyncHandler(async (req, res) => {
     })),
   }));
 
+  // Quizzes attached to this course: a learner starts/practises them right here
+  // instead of hunting for them in the quiz catalogue. Access rules unchanged —
+  // the attempt endpoint still enforces enrolment, premium and privacy rules.
+  // Only the learner's MOST RECENT attempt is joined, otherwise a learner who has
+  // tried the quiz twice would see the same quiz twice on the course page.
+  // Managers see every status; learners only see quizzes that are actually open.
+  const courseQuizzes = await q(
+    `SELECT z.id, z.title, z.slug, z.description, z.quiz_type, z.difficulty, z.total_marks,
+            z.question_count, z.time_limit_minutes, z.passing_score, z.status, z.is_premium,
+            la.id AS attempt_id, la.status AS attempt_status, la.score AS attempt_score,
+            la.total_marks AS attempt_total_marks, la.submitted_at AS attempt_submitted_at
+       FROM quizzes z
+       LEFT JOIN quiz_attempts la
+              ON la.id = (
+                   SELECT a2.id FROM quiz_attempts a2
+                    WHERE a2.quiz_id = z.id AND a2.user_id = ?
+                    ORDER BY a2.id DESC LIMIT 1
+                 )
+      WHERE z.course_id = ? AND z.module_id IS NULL
+        AND (z.status IN ('published','completed') OR ? = 1)
+      ORDER BY z.id`,
+    [req.user ? req.user.id : 0, course.id, canManage ? 1 : 0],
+  );
+
+  // Module quizzes: one assessment per module, shown inside that module on the
+  // course page. Only when the admin switch is on — the switch is a real gate,
+  // not just a CSS trick, so the API stops advertising them too.
+  let moduleQuizzes = [];
+  const moduleQuizzesEnabled = await moduleQuiz.featureEnabled();
+  if (moduleQuizzesEnabled) {
+    moduleQuizzes = await q(
+      `SELECT z.id, z.title, z.module_id, z.total_marks, z.question_count, z.passing_score,
+              z.time_limit_minutes, z.status, z.allow_reattempt,
+              la.id AS attempt_id, la.status AS attempt_status, la.score AS attempt_score,
+              la.total_marks AS attempt_total_marks
+         FROM quizzes z
+         LEFT JOIN quiz_attempts la
+                ON la.id = (
+                     SELECT a2.id FROM quiz_attempts a2
+                      WHERE a2.quiz_id = z.id AND a2.user_id = ?
+                      ORDER BY a2.id DESC LIMIT 1
+                   )
+        WHERE z.course_id = ? AND z.module_id IS NOT NULL
+          AND (z.status IN ('published','completed') OR ? = 1)
+        ORDER BY z.module_id, z.id`,
+      [req.user ? req.user.id : 0, course.id, canManage ? 1 : 0],
+    );
+  }
+  const modulePayloadQuiz = (quiz) => ({
+    id: quiz.id,
+    title: quiz.title,
+    status: quiz.status,
+    visible: quiz.status === 'published' || quiz.status === 'completed',
+    question_count: quiz.question_count,
+    total_marks: quiz.total_marks,
+    passing_score: quiz.passing_score,
+    time_limit_minutes: quiz.time_limit_minutes,
+    allow_reattempt: !!Number(quiz.allow_reattempt),
+    attempt_id: quiz.attempt_id,
+    attempt_status: quiz.attempt_status,
+    attempt_score: quiz.attempt_score,
+    attempt_total_marks: quiz.attempt_total_marks,
+    passed: quiz.attempt_total_marks
+      ? ((Number(quiz.attempt_score) || 0) / Number(quiz.attempt_total_marks)) * 100 >= Number(quiz.passing_score)
+      : false,
+  });
+  const modulesPayload = modulesWithLessons.map((module) => {
+    // A module may carry more than one quiz (a teacher can attach a second one).
+    // `quiz` stays for older callers, `quizzes` is the full list so nothing is
+    // silently invisible on the course page.
+    const quizzes = moduleQuizzes
+      .filter((row) => Number(row.module_id) === Number(module.id))
+      .map(modulePayloadQuiz);
+    return { ...module, quiz: quizzes[0] || null, quizzes };
+  });
+
   ok(res, {
-    ...course, modules: modulesWithLessons, enrolled: !!enrolled, enrollment: enrolled, notes,
+    ...course, modules: modulesPayload, enrolled: !!enrolled, enrollment: enrolled, notes,
+    quizzes: courseQuizzes,
+    module_quizzes_enabled: moduleQuizzesEnabled,
     premium_lock: premiumLock, purchase_required: purchaseRequired, purchased,
   });
+});
+
+/**
+ * GET /api/courses/recommended — signed-in learners only.
+ *
+ * Explainable suggestions from categories/skills of courses the learner already
+ * completed. A suggested course is never pre-enrolled and never unlocks
+ * anything: opening it goes through the normal enrolment/payment flow.
+ */
+const recommendedCourses = asyncHandler(async (req, res) => {
+  if (!req.user) return ok(res, []);
+  if (req.user.role !== 'student') return ok(res, []);
+
+  const completedCategories = await q(
+    `SELECT cat.name AS name, COUNT(*) AS n
+       FROM enrollments e JOIN courses c ON c.id = e.course_id
+       JOIN categories cat ON cat.id = c.category_id
+      WHERE e.user_id = ? AND e.status = 'completed'
+      GROUP BY cat.id, cat.name ORDER BY n DESC LIMIT 5`,
+    [req.user.id],
+  );
+  const completedIds = await q(
+    "SELECT course_id FROM enrollments WHERE user_id = ? AND status IN ('active','completed')",
+    [req.user.id],
+  );
+
+  const rows = await q(
+    `SELECT c.id, c.title, c.slug, c.summary, c.thumbnail, c.difficulty, c.duration_hours,
+            c.price, c.is_premium, c.total_students, c.rating, c.category_id,
+            cat.name AS category_name, GROUP_CONCAT(DISTINCT cat.name) AS category_names,
+            u.full_name AS instructor_name
+       FROM courses c
+       LEFT JOIN categories cat ON cat.id = c.category_id
+       LEFT JOIN users u ON u.id = c.instructor_id
+      WHERE c.status = 'published'
+      GROUP BY c.id, cat.name, u.full_name
+      ORDER BY c.total_students DESC, c.id DESC
+      LIMIT 60`,
+  );
+
+  const candidates = rows.map((row) => ({
+    ...row,
+    enrollment_count: Number(row.total_students || 0),
+    categories: String(row.category_names || '').split(',').map((name) => name.trim()).filter(Boolean),
+    skills: '',
+  }));
+
+  const suggestions = recommendCourses({
+    candidates,
+    interests: {
+      categories: completedCategories.map((row) => ({ name: row.name, count: Number(row.n) })),
+      skills: [],
+      enrolled_ids: completedIds.map((row) => Number(row.course_id)),
+    },
+    limit: 6,
+  });
+  ok(res, suggestions.map(({ category_names: _ignored, skills: _skills, ...rest }) => rest));
+});
+
+/** Shared loader for course analytics + export (manager only). */
+async function collectCourseAnalytics(course) {
+  const modules = await q('SELECT id, title, position FROM course_modules WHERE course_id = ? ORDER BY position, id', [course.id]);
+  const lessons = await q('SELECT id, module_id FROM lessons WHERE course_id = ? ORDER BY position, id', [course.id]);
+  const learners = await q(
+    `SELECT e.user_id, e.status, e.progress_percent, e.enrolled_at AS started_at,
+            e.last_accessed_at, e.completed_at, u.full_name, u.email
+       FROM enrollments e JOIN users u ON u.id = e.user_id
+      WHERE e.course_id = ? ORDER BY e.enrolled_at DESC`,
+    [course.id],
+  );
+  const progress = await q(
+    'SELECT user_id, lesson_id FROM lesson_progress WHERE course_id = ?', [course.id],
+  );
+  const certificates = await q(
+    "SELECT user_id FROM certificates WHERE course_id = ? AND cert_type='course' AND revoked_at IS NULL",
+    [course.id],
+  );
+  const summary = summarizeCourseAnalytics({
+    modules: modules.map((module) => ({
+      module_id: module.id,
+      title: module.title,
+      position: module.position,
+      lesson_ids: lessons.filter((lesson) => Number(lesson.module_id) === Number(module.id)).map((lesson) => lesson.id),
+    })),
+    learners, progress, certificates,
+  });
+  return { modules, lessons, learners, summary };
+}
+
+/** GET /api/courses/:id/analytics — owner/admin insights for one course. */
+const courseAnalytics = asyncHandler(async (req, res) => {
+  const course = await q1('SELECT id, title, slug, instructor_id, status FROM courses WHERE id = ?', [req.params.id]);
+  if (!course) throw ApiError.notFound('Course not found');
+  if (!isCourseManager(req.user, course)) {
+    throw ApiError.forbidden('Only the course owner or an administrator can see course insights.');
+  }
+  const { summary } = await collectCourseAnalytics(course);
+  ok(res, { ...summary, health: describeCourseHealth(summary) });
+});
+
+/** GET /api/courses/:id/analytics.xlsx — three-sheet workbook. */
+const courseAnalyticsXlsx = asyncHandler(async (req, res) => {
+  const course = await q1('SELECT id, title, slug, instructor_id, status FROM courses WHERE id = ?', [req.params.id]);
+  if (!course) throw ApiError.notFound('Course not found');
+  if (!isCourseManager(req.user, course)) {
+    throw ApiError.forbidden('Only the course owner or an administrator can export course insights.');
+  }
+  const { learners, summary } = await collectCourseAnalytics(course);
+  const stamp = (value) => (value ? new Date(value).toISOString().slice(0, 19).replace('T', ' ') : '');
+
+  const moduleRows = summary.modules.map((module) => [
+    module.position, module.title, module.lessons, module.reached, module.not_reached,
+    { value: module.drop_rate, format: 'decimal' },
+  ]);
+
+  const learnerRows = learners.map((learner) => [
+    learner.full_name || '', learner.email || '',
+    String(learner.status || '').replace('_', ' '),
+    { value: Number(learner.progress_percent) || 0, format: 'decimal' },
+    stamp(learner.started_at), stamp(learner.last_accessed_at), stamp(learner.completed_at),
+  ]);
+
+  const workbook = buildXlsx({
+    sheets: [
+      {
+        name: 'Course summary',
+        columns: [{ header: 'Metric', width: 34 }, { header: 'Value', width: 30 }],
+        rows: [
+          ['Course', course.title],
+          ['Status', course.status],
+          ['Learners enrolled', summary.enrolled],
+          ['Completed', summary.completed],
+          ['In progress', summary.in_progress],
+          ['Completion rate %', { value: summary.completion_rate, format: 'decimal' }],
+          ['Average progress %', { value: summary.avg_progress, format: 'decimal' }],
+          ['Certificates issued', summary.certificates],
+          ['Inactive learners', `${summary.stalled} (no access for ${summary.stall_days}+ days)`],
+          ['Modules', summary.modules.length],
+          ['Lessons', summary.total_lessons],
+          ['Health', describeCourseHealth(summary)],
+          ['Exported at', stamp(new Date())],
+          ['Exported by', req.user ? (req.user.full_name || req.user.email || '') : ''],
+          ['Note', 'Progress comes from the course’s own lesson completion; it is not a measure of time spent.'],
+        ],
+      },
+      {
+        name: 'Module funnel',
+        columns: [
+          { header: 'Position', width: 10 }, { header: 'Module', width: 42 },
+          { header: 'Lessons', width: 10 }, { header: 'Learners finished', width: 18 },
+          { header: 'Not finished', width: 14 }, { header: 'Drop %', width: 12 },
+        ],
+        rows: moduleRows,
+      },
+      {
+        name: 'Learners',
+        columns: [
+          { header: 'Learner', width: 30 }, { header: 'Email', width: 32 },
+          { header: 'Status', width: 14 }, { header: 'Progress %', width: 12 },
+          { header: 'Enrolled', width: 20 }, { header: 'Last accessed', width: 20 },
+          { header: 'Completed', width: 20 },
+        ],
+        rows: learnerRows,
+      },
+    ],
+  });
+
+  const filename = `course-${course.slug || course.id}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+  res.setHeader('Content-Length', workbook.length);
+  res.setHeader('Cache-Control', 'no-store');
+  res.end(workbook);
 });
 
 /** POST /api/courses (developer with create_course | admin) */
@@ -200,12 +462,13 @@ const createCourse = asyncHandler(async (req, res) => {
   const thumbnail = safeExternalUrl(b.thumbnail, { label: 'thumbnail', allowRelative: true });
   const result = await exec(
     `INSERT INTO courses (title, slug, summary, description, thumbnail, category_id, difficulty, language,
-       duration_hours, instructor_id, price, is_featured, status, is_premium)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       duration_hours, instructor_id, price, is_featured, status, is_premium, completion_policy)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [title, slug, b.summary || null, b.description || null, thumbnail, categoryId,
       difficulty, b.language || null, boundedDecimal(b.duration_hours, 0, 0, 9999.9), instructor,
       boundedDecimal(b.price, 0, 0, 999999.99), b.is_featured ? 1 : 0, status,
-      ['owner', 'admin'].includes(req.user.role) && b.is_premium ? 1 : 0],
+      ['owner', 'admin'].includes(req.user.role) && b.is_premium ? 1 : 0,
+      POLICIES.includes(b.completion_policy) ? normalisePolicy(b.completion_policy) : 'click'],
   );
   const course = await q1(`SELECT ${COURSE_SELECT} FROM courses c LEFT JOIN categories cat ON cat.id = c.category_id LEFT JOIN users u ON u.id = c.instructor_id WHERE c.id = ?`, [result.insertId]);
   if (course.status === 'published') {
@@ -226,7 +489,7 @@ const updateCourse = asyncHandler(async (req, res) => {
   }
 
   const allowed = ['title', 'summary', 'description', 'thumbnail', 'category_id', 'difficulty', 'language',
-    'duration_hours', 'instructor_id', 'price', 'is_featured', 'status'];
+    'duration_hours', 'instructor_id', 'price', 'is_featured', 'status', 'completion_policy'];
   const data = {};
   allowed.forEach((key) => { if (req.body[key] !== undefined) data[key] = req.body[key]; });
   if (req.body.is_premium !== undefined) data.is_premium = req.body.is_premium ? 1 : 0;
@@ -244,6 +507,12 @@ const updateCourse = asyncHandler(async (req, res) => {
   }
   if (data.status !== undefined && !COURSE_STATUSES.includes(data.status)) {
     throw ApiError.badRequest('Invalid course status');
+  }
+  if (data.completion_policy !== undefined) {
+    if (!POLICIES.includes(data.completion_policy)) {
+      throw ApiError.badRequest(`completion_policy must be one of: ${POLICIES.join(', ')}`);
+    }
+    data.completion_policy = normalisePolicy(data.completion_policy);
   }
   if (data.difficulty !== undefined && !COURSE_DIFFICULTIES.includes(data.difficulty)) {
     throw ApiError.badRequest('Invalid course difficulty');
@@ -381,11 +650,71 @@ const courseEnrollments = asyncHandler(async (req, res) => {
 });
 
 /** POST /api/enrollments/:id/progress — mark a lesson complete, recompute % */
+/**
+ * Has this learner passed any quiz linked to the course?
+ * Same rule the quiz result page uses: best score >= passing_score percent.
+ */
+async function hasPassedLinkedQuiz(userId, courseId, moduleId = null) {
+  // A module's OWN quiz is the requirement when that module has one — a passed
+  // course-level quiz must not stand in for it. Only when the module has no quiz
+  // do we fall back to the course-level quizzes.
+  // Only quizzes a learner can actually attempt may gate completion: a draft or
+  // archived quiz is invisible in the course page, so counting it would leave the
+  // student permanently blocked with no way to satisfy the requirement.
+  const OPEN = "z.status IN ('published','completed')";
+  const moduleQuizzes = moduleId
+    ? await q(
+      `SELECT z.id, z.passing_score, z.total_marks FROM quizzes z
+        WHERE z.course_id = ? AND z.module_id = ? AND ${OPEN}`,
+      [courseId, moduleId],
+    )
+    : [];
+  const scope = moduleQuizzes.length
+    ? moduleQuizzes
+    : (await q(
+      `SELECT z.id, z.passing_score, z.total_marks FROM quizzes z
+        WHERE z.course_id = ? AND z.module_id IS NULL AND ${OPEN}`,
+      [courseId],
+    ));
+  if (!scope.length) return false;
+
+  const ids = scope.map((row) => Number(row.id));
+  const attempts = await q(
+    `SELECT a.quiz_id, MAX(a.score) AS best
+       FROM quiz_attempts a
+      WHERE a.user_id = ? AND a.status IN ('submitted','evaluated')
+        AND a.quiz_id IN (${ids.map(() => '?').join(',')})
+      GROUP BY a.quiz_id`,
+    [userId, ...ids],
+  );
+  const bestByQuiz = new Map(attempts.map((row) => [Number(row.quiz_id), Number(row.best) || 0]));
+  return scope.some((quiz) => {
+    const total = Number(quiz.total_marks) || 0;
+    if (total <= 0) return false;
+    const best = bestByQuiz.get(Number(quiz.id));
+    if (best === undefined) return false;
+    return (best / total) * 100 >= (Number(quiz.passing_score) || 0);
+  });
+}
+
+/** Watch coverage for one lesson, from the stored 10-second slices. */
+async function watchCoverage(userId, lessonId) {
+  try {
+    return await lessonWatch.readProgress(userId, lessonId);
+  } catch (error) {
+    // Pre-migration database: no watch tables yet → treat as "not measurable"
+    // rather than blocking a completion the course used to allow.
+    if (error && error.code === 'ER_NO_SUCH_TABLE') return null;
+    throw error;
+  }
+}
+
 const updateProgress = asyncHandler(async (req, res) => {
   const { lesson_id } = req.body;
   const enrollment = await q1('SELECT * FROM enrollments WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
   if (!enrollment) throw ApiError.notFound('Enrollment not found');
-  const lesson = await q1('SELECT id, title FROM lessons WHERE id = ? AND course_id = ?', [lesson_id, enrollment.course_id]);
+  // module_id matters: a module's own quiz is the assessment that gates completion.
+  const lesson = await q1('SELECT id, title, module_id FROM lessons WHERE id = ? AND course_id = ?', [lesson_id, enrollment.course_id]);
   if (!lesson) throw ApiError.badRequest('Lesson does not belong to this course');
 
   // Dwell-time gate (see services/lessonOpens.service.js): the lesson content
@@ -411,6 +740,34 @@ const updateProgress = asyncHandler(async (req, res) => {
         `This lesson just needs a bit of time open — you can mark it complete in about ${Math.ceil((dwellMs - waited) / 1000)}s.`,
       );
     }
+  }
+
+  // Course-level completion policy (watch coverage / quiz pass). Measured only
+  // for uploaded video: an external embed cannot be verified, so it is graded
+  // like "no video" instead of pretending we know it was watched.
+  const coursePolicy = await q1('SELECT completion_policy FROM courses WHERE id = ?', [enrollment.course_id]);
+  const policy = normalisePolicy(coursePolicy && coursePolicy.completion_policy);
+  if (policy !== 'click') {
+    const media = await lessonMedia.readLessonMedia(lesson.id);
+    const coverage = await watchCoverage(req.user.id, lesson.id);
+    const moduleQuizRow = requiresQuiz(policy) && lesson.module_id
+      ? await q1(
+        `SELECT z.title FROM quizzes z
+          WHERE z.course_id = ? AND z.module_id = ? AND z.status IN ('published','completed')
+          ORDER BY z.id LIMIT 1`,
+        [enrollment.course_id, lesson.module_id],
+      )
+      : null;
+    const verdict = evaluateCompletion({
+      policy,
+      hasMeasurableVideo: !!(media && media.video_path),
+      coveragePercent: coverage ? coverage.coverage_percent : 0,
+      quizPassed: requiresQuiz(policy)
+        ? await hasPassedLinkedQuiz(req.user.id, enrollment.course_id, lesson.module_id)
+        : false,
+      quizLabel: moduleQuizRow ? `Is module ka quiz (“${moduleQuizRow.title}”)` : '',
+    });
+    if (!verdict.allowed) throw ApiError.badRequest(verdict.reason);
   }
 
   await exec('INSERT IGNORE INTO lesson_progress (user_id, course_id, lesson_id) VALUES (?,?,?)', [req.user.id, enrollment.course_id, lesson_id]);
@@ -573,28 +930,26 @@ const reorderLessons = asyncHandler(async (req, res) => {
 });
 
 const getLesson = asyncHandler(async (req, res) => {
-  const lesson = await q1('SELECT * FROM lessons WHERE id = ?', [req.params.id]);
-  if (!lesson) throw ApiError.notFound('Lesson not found');
-  const parent = await q1('SELECT is_premium, price, status, instructor_id FROM courses WHERE id = ?', [lesson.course_id]);
-  const isStaff = isCourseManager(req.user, parent);
-  if (!parent || (parent.status !== 'published' && !isStaff)) throw ApiError.notFound('Lesson not found');
-  // Enrollment is the primary entitlement. The subscription gate applies
-  // only to premium courses without a one-off price; a purchased premium+
-  // priced course must remain readable after its paid enrollment.
-  if (!lesson.is_preview && !isStaff) {
-    if (!req.user) throw ApiError.unauthorized('Login and enroll in this course to access the lesson');
-    const enrolled = await q1('SELECT id FROM enrollments WHERE course_id = ? AND user_id = ?', [lesson.course_id, req.user.id]);
-    if (!enrolled) throw ApiError.forbidden('Enroll in this course to access the lesson');
-    if (Number(parent.is_premium) && Number(parent.price || 0) <= 0
-        && !(await subs.hasPremiumAccess(req.user))) {
-      throw subs.premiumError('lesson');
-    }
-  }
+  // Entitlement lives in lessonAccess.service because the video/PDF routes use
+  // the same rule — otherwise a page could hide the text but hand over the
+  // recording.
+  const { lesson } = await assertLessonAccess(req.user, req.params.id);
+
   // Stamp the open: updateProgress requires this stamp (plus a short dwell
   // time) before a lesson can be marked complete, so completion certificates
   // and their points can no longer be farmed by blind-firing lesson ids.
   if (req.user) await lessonOpens.recordView(req.user.id, lesson.id);
-  ok(res, lesson);
+
+  // Uploaded media is referenced by flag + name only; the file itself is only
+  // reachable through the gated /video and /pdf routes.
+  const media = lessonMedia.describeMedia(lesson);
+  ok(res, {
+    ...lesson,
+    video_path: undefined,
+    pdf_path: undefined,
+    video_upload: media.video_upload,
+    pdf_upload: media.pdf_upload,
+  });
 });
 
 const updateModule = asyncHandler(async (req, res, next) => {
@@ -629,6 +984,7 @@ const removeLesson = asyncHandler(async (req, res, next) => {
 
 module.exports = {
   listCourses, getCourse, createCourse, updateCourse, removeCourse, uploadThumbnail,
+  recommendedCourses, courseAnalytics, courseAnalyticsXlsx,
   enroll, myEnrollments, courseEnrollments, updateProgress,
   listModules, createModule, createLesson, updateLesson, reorderLessons, getLesson,
   updateModule, removeModule, removeLesson,

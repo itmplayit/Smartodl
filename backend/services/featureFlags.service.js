@@ -84,6 +84,27 @@ async function ensureFeatureFlags() {
     seedFrom: 'quiz_lockdown_enabled',
   })) created.push('quiz_cp_block');
 
+  /* ── 2c. module quizzes (course ke andar, har module ka apna quiz) ──
+     Two separate admin switches, deliberately:
+       - module_quizzes_enabled         : the feature itself (UI + API),
+       - module_quiz_anticheat_enabled  : the anti-cheat floor for those quizzes
+                                          (tab guard + fullscreen + copy-paste
+                                          + screenshot block, never a camera).
+     A module quiz is a normal quiz, so the webcam/screen-share switches (which
+     only ever apply to LIVE quizzes) can never touch it. */
+  if (await ensureFlag({
+    key: 'module_quizzes_enabled',
+    label: 'Module quizzes (course ke andar har module ka quiz) - separate ON/OFF',
+    dflt: '1',
+    group: 'features',
+  })) created.push('module_quizzes_enabled');
+  if (await ensureFlag({
+    key: 'module_quiz_anticheat_enabled',
+    label: 'Module quiz anti-cheat floor (tab guard + fullscreen + copy-paste + screenshot block; NO webcam, NO screen share)',
+    dflt: '1',
+    group: 'anti_cheat',
+  })) created.push('module_quiz_anticheat_enabled');
+
   /* ── 3. live proctoring (webcam + screen share) ──
      Both default to OFF. Pointing a camera at a student is an institutional
      decision with consent implications; it must never switch itself on
@@ -120,6 +141,62 @@ async function ensureFeatureFlags() {
     // eslint-disable-next-line no-await-in-loop
     if (await ensureFlag({ key, label, dflt })) created.push(key);
   }
+  if (await ensureFlag({
+    key: 'proctor_recording_enabled',
+    label: 'Advanced proctoring - consent-based manual recording',
+    dflt: '0',
+    group: 'anti_cheat',
+    inputType: 'boolean',
+  })) created.push('proctor_recording_enabled');
+  if (await ensureFlag({
+    key: 'proctor_recording_retention_days',
+    label: 'Proctor recordings - retention in days',
+    dflt: '30',
+    group: 'anti_cheat',
+    inputType: 'number',
+  })) created.push('proctor_recording_retention_days');
+  if (await ensureFlag({
+    key: 'integrity_score_enabled',
+    label: 'Integrity score - admin-only review score master switch',
+    dflt: '1',
+    group: 'anti_cheat',
+    inputType: 'boolean',
+  })) created.push('integrity_score_enabled');
+  if (await ensureFlag({
+    key: 'integrity_score_tab_switch_penalty',
+    label: 'Integrity score - points deducted per tab switch',
+    dflt: '5',
+    group: 'anti_cheat',
+    inputType: 'number',
+  })) created.push('integrity_score_tab_switch_penalty');
+  if (await ensureFlag({
+    key: 'integrity_score_proctor_violation_penalty',
+    label: 'Integrity score - points deducted per proctor violation',
+    dflt: '10',
+    group: 'anti_cheat',
+    inputType: 'number',
+  })) created.push('integrity_score_proctor_violation_penalty');
+  if (await ensureFlag({
+    key: 'certificate_integrity_band_enabled',
+    label: 'Certificates - show green/yellow/red integrity review band',
+    dflt: '1',
+    group: 'anti_cheat',
+    inputType: 'boolean',
+  })) created.push('certificate_integrity_band_enabled');
+  if (await ensureFlag({
+    key: 'certificate_integrity_band_public',
+    label: 'Certificates - also show the integrity band on public verification pages',
+    dflt: '0',
+    group: 'anti_cheat',
+    inputType: 'boolean',
+  })) created.push('certificate_integrity_band_public');
+  if (await ensureFlag({
+    key: 'certificate_integrity_scope',
+    label: 'Certificates - integrity band scope (course or overall)',
+    dflt: 'course',
+    group: 'anti_cheat',
+    inputType: 'text',
+  })) created.push('certificate_integrity_scope');
   if (await ensureFlag({
     key: 'proctor_webrtc_ice_servers',
     label: 'Advanced proctoring - WebRTC ICE servers (JSON)',

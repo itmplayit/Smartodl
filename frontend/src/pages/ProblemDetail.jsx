@@ -351,7 +351,9 @@ export default function ProblemDetail() {
         <div className="arena-left">
           <div className="lc-tabs">
             <button className={`lc-tab ${outTab === 'problem' ? 'active' : ''}`} onClick={() => setOutTab('problem')}>📄 Description</button>
-            <button className={`lc-tab ${outTab === 'editorial' ? 'active' : ''}`} onClick={() => setOutTab('editorial')}>📘 Editorial</button>
+            {problem.editorial_available && (
+              <button className={`lc-tab ${outTab === 'editorial' ? 'active' : ''}`} onClick={() => setOutTab('editorial')}>📘 Editorial</button>
+            )}
             <button className={`lc-tab ${outTab === 'subs' ? 'active' : ''}`} onClick={() => { setOutTab('subs'); loadSubs(); }}>🗂 Submissions</button>
             <button className={`lc-tab ${outTab === 'discuss' ? 'active' : ''}`} onClick={() => setOutTab('discuss')}>💬 Discuss</button>
             <button type="button" className="lc-tab-icon" aria-label={rightHidden ? 'Show code panel' : 'Hide code panel'} title={rightHidden ? 'Show code panel' : 'Hide code panel'} onClick={() => setRightHidden((v) => !v)}>{rightHidden ? '⛶' : '❮'}</button>

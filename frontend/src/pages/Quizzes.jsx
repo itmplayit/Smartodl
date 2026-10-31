@@ -84,7 +84,12 @@ export default function Quizzes() {
               <div className="card hover" key={z.id}>
                 <div className="between mb-s">
                   <StatusBadge value={z.status} />
-                  <span className="tag">{z.quiz_type === 'live' ? '📡 live' : '📝 practice'}</span>
+                  <span className="row" style={{ gap: 6 }}>
+                    {z.module_id ? (
+                      <span className="tag" title="Module quiz — course ke andar, anti-cheat ke saath (no camera)">📚 module quiz</span>
+                    ) : null}
+                    <span className="tag">{z.quiz_type === 'live' ? '📡 live' : '📝 practice'}</span>
+                  </span>
                 </div>
                 <Link to={target}><h3 style={{ fontSize: '1.05rem' }}>{z.title}</h3></Link>
                 <p className="tiny muted">{(z.description || '').slice(0, 100)}</p>

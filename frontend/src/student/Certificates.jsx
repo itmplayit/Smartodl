@@ -8,13 +8,37 @@ const TYPE_META = {
   quiz:      { icon: '📝', label: 'Quiz Excellence',       badge: 'QUIZ',      ring: '#3b82f6' },
   contest:   { icon: '🏆', label: 'Contest Champion',     badge: 'CONTEST',   ring: '#ef4444' },
   milestone: { icon: '💻', label: 'Coding Milestone',     badge: 'MILESTONE', ring: '#10b981' },
+  path:      { icon: '🛤️', label: 'Programme completion (legacy)', badge: 'PATH', ring: '#8b5cf6' },
 };
+const INTEGRITY_TONE = { green: '#16a34a', yellow: '#d97706', red: '#dc2626', muted: '#64748b' };
+function IntegrityChip({ integrity }) {
+  if (!integrity || !integrity.shown) return null;
+  const color = INTEGRITY_TONE[integrity.tone] || INTEGRITY_TONE.muted;
+  return (
+    <div
+      title={integrity.note || ''}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 7, marginTop: 10,
+        padding: '4px 10px', borderRadius: 999, background: `${color}22`,
+        border: `1px solid ${color}88`, color: '#0f172a', fontSize: 12, fontWeight: 700,
+      }}
+    >
+      <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, display: 'inline-block' }} />
+      Integrity: {integrity.label}
+      <span style={{ fontWeight: 500, opacity: 0.75 }}>
+        {integrity.available ? `${Number(integrity.score).toFixed(0)}/100` : '—'}
+      </span>
+    </div>
+  );
+}
+
 const GRAD = { 'A+': '#10b981', A: '#059669', B: '#3b82f6', C: '#f59e0b', D: '#f97316', F: '#ef4444' };
 const GRADS = {
   course:    'linear-gradient(135deg,#fde68a 0%,#f59e0b 55%,#b45309 100%)',
   quiz:      'linear-gradient(135deg,#bfdbfe 0%,#3b82f6 55%,#1e3a8a 100%)',
   contest:   'linear-gradient(135deg,#fecaca 0%,#ef4444 55%,#7f1d1d 100%)',
   milestone: 'linear-gradient(135deg,#a7f3d0 0%,#10b981 55%,#064e3b 100%)',
+  path:      'linear-gradient(135deg,#ddd6fe 0%,#8b5cf6 55%,#4c1d95 100%)',
 };
 function fd(d){ return d ? new Date(d).toLocaleDateString('en-IN',{year:'numeric',month:'long',day:'numeric'}) : ''; }
 
@@ -52,7 +76,7 @@ export default function Certificates() {
         <div className="panel" style={{padding:48,textAlign:'center'}}>
           <div style={{fontSize:56,marginBottom:12}}>🎓</div>
           <h2 className="theme-heading" style={{margin:0}}>No certificates yet</h2>
-          <p className="theme-muted" style={{marginTop:8}}>Complete courses, score high in quizzes, win contests and unlock coding milestones to earn certificates.</p>
+          <p className="theme-muted" style={{marginTop:8}}>Integrity review bands are shown for course certificates that have a linked, monitored assessment. They are review indicators, never a finding of misconduct. Complete courses, score high in quizzes, win contests and unlock coding milestones to earn certificates.</p>
         </div>
       ) : (
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))',gap:20}}>
@@ -65,6 +89,7 @@ export default function Certificates() {
             if (t==='quiz'){lbl='Score';val=`${Number(c.score_percent||0)}%`;}
             else if (t==='contest'){lbl='Rank';val=contestRankLabel(c.tier);}
             else if (t==='milestone'){lbl='Milestone';val=certificateTierLabel(c.tier)||'Achieved';}
+            else if (t==='path'){lbl='Completion';val='100%';}
             return (
               <div key={c.id} className="cert-card">
                 <div className="cert-card-bg" style={{background:grad}}><div className="cert-shine"/></div>
@@ -82,6 +107,7 @@ export default function Certificates() {
                     <div className="cert-kicker" style={{color:'#0f172a'}}>Awarded to</div>
                     <div style={{fontSize:20,fontWeight:800,color:'#0f172a'}}>{c.student_name}</div>
                   </div>
+                  <IntegrityChip integrity={c.integrity} />
                   <div style={{display:'flex',gap:16,marginTop:16,flexWrap:'wrap'}}>
                     <div className="stat-small"><div>{lbl}</div><strong style={{color:t==='course'?(GRAD[c.grade]||'#64748b'):'#0f172a'}}>{val}</strong></div>
                     {t==='course' && <div className="stat-small"><div>Score</div><strong style={{color:'#0f172a'}}>{Number(c.score_percent||0)}%</strong></div>}

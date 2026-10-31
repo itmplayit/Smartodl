@@ -7,6 +7,9 @@ const crypto = require('crypto');
 const { q, q1, exec, tx } = require('../config/db');
 const { ApiError, asyncHandler, ok, created, slugify, parsePagination, sorting, assignRanks, fromJson } = require('../utils/helpers');
 const judge = require('../services/judge.service');
+const { canReadCodingSubmission } = require('../utils/submissionAccess');
+const { mayViewContestEditorial } = require('../utils/contestEditorialAccess');
+const { mayViewCodingEditorial } = require('../utils/codingEditorialAccess');
 const aiDetect = require('../services/aiDetection.service');
 const antiCheat = require('../services/anticheatSettings.service');
 const { recalcUser, awardAchievements } = require('../services/points.service');
@@ -86,11 +89,12 @@ const listProblems = asyncHandler(async (req, res) => {
     const rows2 = await q("SELECT DISTINCT problem_id FROM coding_submissions WHERE user_id = ? AND status = 'accepted'", [req.user.id]);
     solvedIds = rows2.map((r) => r.problem_id);
   }
-  // p.* contains paid hint text. The list never needs hint content; detail
-  // returns it only after unlock/author checks.
+  // p.* contains paid hints and editorial answers. Neither belongs in a
+  // student catalogue response; editors may see their own/admin-managed copy.
   ok(res, rows.map((r) => ({
     ...r,
     hints: isProblemManager(req.user, r) ? r.hints : null,
+    explanation: isProblemManager(req.user, r) ? r.explanation : null,
     solved: solvedIds.includes(r.id),
   })), { page, limit, total, pages: Math.ceil(total / limit) });
 });
@@ -158,11 +162,27 @@ const getProblem = asyncHandler(async (req, res) => {
   const hint = await hintInfo(req.user && req.user.id, problem.id, !!(problem.hints && String(problem.hints).trim()));
   if (canManage) hint.hint_unlocked = true;
   if (!canManage && !hint.hint_unlocked) problem.hints = null;
+
+  // Editorials are never included in the catalogue. On detail, reveal only to
+  // the author/admin, a student who solved the problem, or after every
+  // non-draft contest containing it has ended/cancelled.
+  const editorialContests = await q(
+    `SELECT c.status, c.end_at FROM contests c
+       JOIN contest_problems cp ON cp.contest_id = c.id
+      WHERE cp.problem_id = ? AND c.status <> 'draft'`,
+    [problem.id],
+  );
+  const editorialAvailable = mayViewCodingEditorial({
+    canManage, solved, contests: editorialContests,
+  });
+
   // Arena anti-cheat (copy-paste block, screenshot block, AI detection)
   // resolves per problem CREATOR — each developer controls their own set.
   const effectiveAntiCheat = await antiCheat.resolveForUser(problem.created_by);
   ok(res, {
     ...problem,
+    explanation: editorialAvailable ? problem.explanation : null,
+    editorial_available: editorialAvailable,
     anticheat: effectiveAntiCheat,
     examples,
     starter_code: problem.starter_code || {},
@@ -772,12 +792,13 @@ const submissionDetail = asyncHandler(async (req, res) => {
        JOIN coding_problems p ON p.id = s.problem_id JOIN users u ON u.id = s.user_id WHERE s.id = ?`, [req.params.id],
   );
   if (!submission) throw ApiError.notFound('Submission not found');
-  const isOwner = req.user && submission.user_id === req.user.id;
-  // `isStaff` was referenced here but never declared in this handler, so EVERY
-  // call threw ReferenceError and returned 500 — staff could not open a
-  // submission at all, which is also where the AI-detection breakdown lives.
-  const isStaff = req.user && ['owner', 'admin', 'developer'].includes(req.user.role);
-  if (!isOwner && !isStaff) throw ApiError.forbidden('You can only view your own submissions');
+  // Match the authorization policy of GET /coding/submissions: owners can
+  // inspect their own work, admins may inspect any work, and developers need
+  // the explicit view_submissions permission. Authentication alone is not
+  // sufficient for another user's source code or AI-detection data.
+  if (!canReadCodingSubmission(req.user, submission.user_id)) {
+    throw ApiError.forbidden('You can only view your own submissions unless you have submission-view permission');
+  }
   let resultRows = [];
   try {
     resultRows = await q(
@@ -834,6 +855,9 @@ const listContests = asyncHandler(async (req, res) => {
   }
   ok(res, rows.map((r) => ({
     ...r,
+    // `c.*` includes editorial; do not disclose contest solutions in the
+    // public catalogue before the contest has ended.
+    editorial: mayViewContestEditorial(req.user, r) ? r.editorial : null,
     participant_count: Number(r.registered_count || 0),
     registered: registeredIds.includes(r.id),
   })));
@@ -881,7 +905,7 @@ const getContest = asyncHandler(async (req, res) => {
       locked: true,
     }));
 
-  if (!canManage && !ended) contest.editorial = null;
+  if (!mayViewContestEditorial(req.user, contest)) contest.editorial = null;
   ok(res, {
     ...contest,
     participant_count: Number(contest.registered_count || 0),

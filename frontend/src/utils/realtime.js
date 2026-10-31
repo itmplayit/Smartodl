@@ -11,7 +11,7 @@ let retryTimer = null;
 let failures = 0;
 const EVENTS = new Set([
   'notification', 'live_quiz', 'submission_judged', 'settings_changed',
-  'proctor_signal', 'proctor_warning',
+  'proctor_signal', 'proctor_warning', 'proctor_recording_request', 'proctor_recording_stop',
 ]);
 
 function dispatchFrame(frame) {

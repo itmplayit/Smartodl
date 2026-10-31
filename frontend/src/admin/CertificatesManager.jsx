@@ -8,6 +8,7 @@ const TYPE_META = {
   quiz:      { icon: '📝', label: 'Quiz Excellence',    badge: 'QUIZ',      ring: '#3b82f6', grad: 'linear-gradient(135deg,#bfdbfe,#3b82f6,#1e3a8a)' },
   contest:   { icon: '🏆', label: 'Contest Champion',  badge: 'CONTEST',   ring: '#ef4444', grad: 'linear-gradient(135deg,#fecaca,#ef4444,#7f1d1d)' },
   milestone: { icon: '💻', label: 'Coding Milestone',  badge: 'MILESTONE', ring: '#10b981', grad: 'linear-gradient(135deg,#a7f3d0,#10b981,#064e3b)' },
+  path:      { icon: '🛤️', label: 'Programme completion (legacy)', badge: 'PATH', ring: '#8b5cf6', grad: 'linear-gradient(135deg,#ddd6fe,#8b5cf6,#4c1d95)' },
 };
 
 function fd(d) { return d ? new Date(d).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'; }
@@ -57,7 +58,7 @@ export default function CertificatesManager() {
         <div>
           <div className="eyebrow">ADMIN • CREDENTIALS</div>
           <h1 className="theme-heading" style={{ margin: '8px 0', fontSize: 28 }}>Certificate Manager</h1>
-          <p className="theme-muted" style={{ margin: 0 }}>View, verify, revoke and re-issue certificates — and design the templates they are printed with.</p>
+          <p className="theme-muted" style={{ margin: 0 }}>View, verify, revoke and re-issue course and legacy programme certificates — and design their print templates.</p>
         </div>
 
       </div>
@@ -102,6 +103,7 @@ export default function CertificatesManager() {
             <option value="quiz">📝 Quiz</option>
             <option value="contest">🏆 Contest</option>
             <option value="milestone">💻 Milestone</option>
+            <option value="path">🛤️ Programme (legacy)</option>
           </select>
           <button className="btn btn-primary" type="submit">Search</button>
           {(type || search) && <button className="btn btn-ghost" type="button" onClick={() => { setType(''); setSearch(''); setPage(1); load(); }}>Clear</button>}
@@ -113,7 +115,7 @@ export default function CertificatesManager() {
           <div className="panel" style={{ padding: 48, textAlign: 'center' }}>
             <div style={{ fontSize: 56 }}>🎓</div>
             <h2 className="theme-heading">No certificates yet</h2>
-            <p className="theme-muted">Certificates will appear here after learners meet the configured course, quiz, contest, or coding milestone requirements.</p>
+            <p className="theme-muted">Certificates appear here after learners complete eligible courses, meet quiz/contest criteria, or unlock coding milestones.</p>
           </div>
         ) : (
           <>

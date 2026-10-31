@@ -76,6 +76,21 @@ rem ---------- Try standard XAMPP MySQL when a local DB is not running ---------
 if /I "%DB_HOST%"=="127.0.0.1" call :ensure_local_mysql
 if /I "%DB_HOST%"=="localhost" call :ensure_local_mysql
 
+rem ---------- Optional trusted-private-LAN frontend access ----------
+rem Default remains loopback-only. VITE_HOST=0.0.0.0 can be pre-set in the
+rem calling Command Prompt, or opted into here for this launcher run only.
+set "LAN_MODE=0"
+set "LAN_CHOICE="
+if /I "%VITE_HOST%"=="0.0.0.0" set "LAN_MODE=1"
+if "%LAN_MODE%"=="1" goto :lan_choice_done
+echo.
+echo By default the frontend is reachable only from this computer.
+set /p "LAN_CHOICE=Allow another laptop on this trusted private Wi-Fi/LAN? [y/N]: "
+if /I "%LAN_CHOICE%"=="Y" set "VITE_HOST=0.0.0.0"
+if /I "%VITE_HOST%"=="0.0.0.0" set "LAN_MODE=1"
+:lan_choice_done
+if "%LAN_MODE%"=="1" echo [LAN] Frontend will listen on the LAN; API and database stay bound locally.
+
 rem ---------- Restart project services so backend route/code updates load ----------
 echo.
 echo [RESTART] Closing previous SmartODL service windows...
@@ -112,12 +127,19 @@ if errorlevel 1 (
   echo [SKIP] Port 5000 is already open; backend was not duplicated.
 )
 
+set "LAN_FRONTEND_STARTED=0"
 call :is_port_open 5173
 if errorlevel 1 (
-  echo [START] Frontend on http://localhost:5173
+  if "%LAN_MODE%"=="1" (
+    echo [START] Frontend on all interfaces for trusted LAN access (port 5173)
+  ) else (
+    echo [START] Frontend on http://localhost:5173
+  )
   start "SmartODL Frontend" /D "%ROOT%\frontend" cmd /k "title SmartODL Frontend ^&^& npm run dev"
+  set "LAN_FRONTEND_STARTED=1"
 ) else (
   echo [SKIP] Port 5173 is already open; frontend was not duplicated.
+  if "%LAN_MODE%"=="1" echo [WARNING] Existing server may still be loopback-only; close its window and rerun Setup.bat for a reliable LAN link.
 )
 
 rem ---------- Wait for health and open the site ----------
@@ -146,9 +168,19 @@ echo.
 echo ============================================================
 echo SmartODL has been launched.
 echo Frontend:  http://localhost:5173
+if "%LAN_MODE%"=="1" (
+  if "%LAN_FRONTEND_STARTED%"=="1" (
+    echo Shareable private-LAN URL(s):
+    node "%ROOT%\tools\print-lan-url.js" 5173
+    echo If a second laptop cannot connect, allow Node.js/Vite on the Windows Firewall Private profile.
+  ) else (
+    echo [LAN] Setup did not restart the existing port 5173 listener, so it cannot confirm a shareable URL.
+    echo Close the old frontend process and run Setup.bat again.
+  )
+)
 echo API:       http://localhost:5000/api/health
 if /I "%JUDGE_MODE%"=="local" echo Judge:     http://127.0.0.1:2358/health
- echo.
+echo.
 echo Keep the three SmartODL service windows open while using the app.
 echo Run Setup.bat again after an update; existing SmartODL services are restarted.
 echo ============================================================

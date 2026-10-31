@@ -11,6 +11,16 @@ const UPLOAD_ROOT = path.resolve(__dirname, '..', process.env.UPLOAD_DIR || 'upl
 const MAX_MB = Number(process.env.MAX_FILE_SIZE_MB || 25);
 
 const NOTE_TYPES = ['.pdf', '.doc', '.docx', '.ppt', '.pptx', '.png', '.jpg', '.jpeg', '.txt', '.md'];
+// Lesson media: only formats a browser can actually play inline. A .mkv or a
+// .mov would upload fine and then show a black player, so they are refused
+// here with a message naming the accepted formats.
+const VIDEO_TYPES = ['.mp4', '.m4v', '.webm', '.ogv', '.ogg'];
+// Browsers send the real video MIME; curl, mobile share sheets and some
+// browsers send application/octet-stream. The magic-number check in
+// validateLessonVideo is the real gate, so a generic MIME is not a reason to
+// reject a genuine file — but a video MIME mismatch still is.
+const VIDEO_MIME_TYPES = ['video/mp4', 'video/webm', 'video/ogg', 'video/x-m4v', 'application/ogg', 'application/octet-stream', ''];
+const PDF_TYPES = ['.pdf'];
 const IMAGE_TYPES = ['.png', '.jpg', '.jpeg', '.webp'];
 const IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 
@@ -26,6 +36,13 @@ function makeStorage(subdir) {
       cb(null, `${safeBase}-${Date.now()}-${randomToken(4)}${path.extname(file.originalname).toLowerCase()}`);
     },
   });
+}
+
+/** Multer keeps its own error class; map it to a message a teacher can act on. */
+function uploadErrorMessage(error) {
+  if (!error) return null;
+  if (error.code === 'LIMIT_FILE_SIZE') return 'File is too large. Please compress it or upload a smaller version.';
+  return error.message || 'The upload failed';
 }
 
 function makeUploader(subdir, allowed, maxMb = MAX_MB, allowedMimeTypes = null) {
@@ -60,6 +77,13 @@ const landingMediaUpload = makeUploader(
   ['image/png', 'image/jpeg', 'image/webp'],
 );
 
+// 200 MB default for video: a 10-minute 720p lesson is ~60-80 MB, so this fits
+// a real lecture without inviting a 2 GB dump. MAX_VIDEO_SIZE_MB overrides it.
+const MAX_VIDEO_MB = Number(process.env.MAX_VIDEO_SIZE_MB || 200);
+const MAX_PDF_MB = Number(process.env.MAX_PDF_SIZE_MB || 25);
+const lessonVideoUpload = makeUploader('lesson-media', VIDEO_TYPES, MAX_VIDEO_MB, VIDEO_MIME_TYPES);
+const lessonPdfUpload = makeUploader('lesson-media', PDF_TYPES, MAX_PDF_MB, ['application/pdf', 'application/octet-stream', '']);
+
 async function hasValidNoteSignature(file) {
   const handle = await fs.promises.open(file.path, 'r');
   try {
@@ -81,6 +105,57 @@ async function hasValidNoteSignature(file) {
     if (['.txt', '.md'].includes(ext)) return !data.includes(0);
     return false;
   } finally { await handle.close(); }
+}
+
+/** Real signature check for lesson video: the extension alone proves nothing. */
+async function hasValidVideoSignature(file) {
+  const handle = await fs.promises.open(file.path, 'r');
+  try {
+    const bytes = Buffer.alloc(16);
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+    // 8 bytes is enough for every magic number below (mp4's ftyp sits at 4..8).
+    if (bytesRead < 8) return false;
+    const ext = path.extname(file.originalname).toLowerCase();
+    const ascii = bytes.subarray(0, 12).toString('latin1');
+    const isMp4 = bytes.subarray(4, 8).toString('latin1') === 'ftyp';
+    const isWebm = bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3;
+    const isOgg = ascii.startsWith('OggS');
+    if (['.mp4', '.m4v'].includes(ext)) return isMp4;
+    if (ext === '.webm') return isWebm;
+    if (['.ogv', '.ogg'].includes(ext)) return isOgg;
+    return false;
+  } finally { await handle.close(); }
+}
+
+async function validateLessonVideo(req, res, next) {
+  if (!req.file) return next(ApiError.badRequest('Choose a video file to upload'));
+  try {
+    if (await hasValidVideoSignature(req.file)) return next();
+    await fs.promises.unlink(req.file.path).catch(() => {});
+    return next(ApiError.badRequest('That file is not a valid MP4, M4V, WebM or OGV video'));
+  } catch (error) {
+    await fs.promises.unlink(req.file.path).catch(() => {});
+    return next(error);
+  }
+}
+
+async function validateLessonPdf(req, res, next) {
+  if (!req.file) return next(ApiError.badRequest('Choose a PDF file to upload'));
+  try {
+    const handle = await fs.promises.open(req.file.path, 'r');
+    let okFlag = false;
+    try {
+      const head = Buffer.alloc(5);
+      const { bytesRead } = await handle.read(head, 0, 5, 0);
+      okFlag = bytesRead === 5 && head.toString('ascii') === '%PDF-';
+    } finally { await handle.close(); }
+    if (okFlag) return next();
+    await fs.promises.unlink(req.file.path).catch(() => {});
+    return next(ApiError.badRequest('That file is not a valid PDF'));
+  } catch (error) {
+    await fs.promises.unlink(req.file.path).catch(() => {});
+    return next(error);
+  }
 }
 
 async function validateNoteFile(req, res, next) {
@@ -124,6 +199,9 @@ const publicUrl = (file) => (file ? `/uploads/${path.relative(UPLOAD_ROOT, file.
 
 module.exports = {
   notesUpload, imageUpload, avatarUpload, bannerUpload, landingMediaUpload,
+  lessonVideoUpload, lessonPdfUpload,
   validateRasterImage, hasValidRasterSignature, validateNoteFile, hasValidNoteSignature,
+  validateLessonVideo, validateLessonPdf, hasValidVideoSignature,
+  uploadErrorMessage, MAX_VIDEO_MB, MAX_PDF_MB, VIDEO_TYPES, PDF_TYPES,
   publicUrl, UPLOAD_ROOT, ensureDir,
 };

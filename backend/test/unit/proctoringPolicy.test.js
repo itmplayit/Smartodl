@@ -15,6 +15,9 @@ test('student-reportable events can never mint host/server attestations', () => 
   assert.equal(client.has('camera_off'), true);
   assert.equal(client.has('room_scan_completed'), true);
   assert.equal(client.has('identity_check_completed'), true);
+  for (const type of client) {
+    assert.ok(proctor.EVENT_FEATURE_REQUIREMENTS[type], `${type} must have a policy gate`);
+  }
 
   assert.deepEqual([...proctor.eventsForSource('host')].sort(), ['host_warning_sent', 'identity_verified']);
   assert.equal(proctor.eventsForSource('server').has('second_camera_connected'), true);
@@ -51,12 +54,30 @@ test('live policy forces only the sensors its enabled checks need', () => {
   assert.equal(micOnly.screen_required, false);
   assert.equal(micOnly.advanced.mic, true);
 
+  const dualMonitorOnly = proctor.buildProctorPolicy({
+    live: true,
+    advanced: { master: true, dualMonitor: true },
+  });
+  assert.equal(dualMonitorOnly.camera_required, false);
+  assert.equal(dualMonitorOnly.screen_required, false, 'display-count detection must not request screen capture');
+  assert.equal(dualMonitorOnly.advanced.dual_monitor, true);
+
   const snapshot = proctor.buildProctorPolicy({
     live: true,
     advanced: { master: true, snapshot: true },
   });
   assert.equal(snapshot.camera_required, true);
   assert.equal(snapshot.screen_required, true);
+
+  const recordingOnly = proctor.buildProctorPolicy({
+    live: true,
+    advanced: { master: false, recording: true },
+  });
+  assert.equal(recordingOnly.camera_required, true);
+  assert.equal(recordingOnly.screen_required, true);
+  const recordingEffective = proctor.effectiveAdvancedPolicy(recordingOnly, { master: false, recording: true });
+  assert.equal(recordingEffective.recording, true, 'recording master switch is independent of Advanced Proctoring master');
+  assert.equal(recordingEffective.snapshot, false);
 });
 
 test('effective policy is frozen ∩ current: mid-exam ON never activates, OFF stops', () => {
@@ -79,6 +100,22 @@ test('effective policy is frozen ∩ current: mid-exam ON never activates, OFF s
   // No snapshot at all → nothing advanced may run for that attempt.
   const noPolicy = proctor.effectiveAdvancedPolicy(null, { master: true, snapshot: true });
   assert.equal(noPolicy.snapshot, false);
+});
+
+
+test('client event evidence is accepted only for an enabled feature in the attempt policy', () => {
+  assert.equal(proctor.eventAllowedByFeatures('multiple_displays_detected', { dual_monitor: true }), true);
+  assert.equal(proctor.eventAllowedByFeatures('multiple_displays_detected', { screen: true }), false);
+  assert.equal(proctor.eventAllowedByFeatures('voice_detected', { mic: false }), false);
+  assert.equal(proctor.eventAllowedByFeatures('voice_detected', { mic: true }), true);
+  assert.equal(proctor.eventAllowedByFeatures('looking_away', { body: true }), false);
+  assert.equal(proctor.eventAllowedByFeatures('looking_away', { head_pose: true }), true);
+  assert.equal(proctor.eventAllowedByFeatures('no_face', { camera: true }), false);
+  assert.equal(proctor.eventAllowedByFeatures('no_face', { face: true }), true);
+  assert.equal(proctor.eventAllowedByFeatures('phone_detected', { camera: true }), false);
+  assert.equal(proctor.eventAllowedByFeatures('phone_detected', { objects: true }), true);
+  assert.equal(proctor.eventAllowedByFeatures('live_view_started', { live_view: false }), false);
+  assert.equal(proctor.eventAllowedByFeatures('made_up_event', { camera: true }), false);
 });
 
 test('policy parsing tolerates stored JSON and rejects junk', () => {

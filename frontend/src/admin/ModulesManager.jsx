@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import LessonMediaFields from '../components/LessonMediaFields';
+import { useSettings } from '../context/SettingsContext';
 import { courseApi, miscApi } from '../services/api';
 import { useToast } from '../context/ToastContext';
 import { Empty, Loader, Modal } from '../components/ui';
@@ -13,6 +15,9 @@ export default function ModulesManager({ scope = 'admin' }) {
   const [moduleOpen, setModuleOpen] = useState(false);
   const [lessonFor, setLessonFor] = useState(null);
   const [moduleForm, setModuleForm] = useState({ title: '', description: '', position: 1 });
+  const [mediaLesson, setMediaLesson] = useState(null);
+  const { isOn } = useSettings();
+  const moduleQuizzesOn = isOn('module_quizzes_enabled', true);
   const [lessonForm, setLessonForm] = useState({ title: '', description: '', video_url: '', content: '', duration_minutes: 10, position: 1, is_preview: 0 });
   const base = scope === 'admin' ? '/admin' : '/developer';
 
@@ -46,8 +51,13 @@ export default function ModulesManager({ scope = 'admin' }) {
   const addLesson = async (e) => {
     e.preventDefault();
     try {
-      await courseApi.createLesson({ ...lessonForm, module_id: lessonFor.id, course_id: Number(courseId), duration_minutes: Number(lessonForm.duration_minutes), position: Number(lessonForm.position) });
-      toast.success('Lesson added'); setLessonFor(null); loadCourse();
+      const { data } = await courseApi.createLesson({ ...lessonForm, module_id: lessonFor.id, course_id: Number(courseId), duration_minutes: Number(lessonForm.duration_minutes), position: Number(lessonForm.position) });
+      toast.success('Lesson added');
+      setLessonFor(null);
+      // The lesson must exist before a file can belong to it, so the uploader
+      // opens right after the create instead of inside the create form.
+      if (data?.data?.id) setMediaLesson(data.data);
+      loadCourse();
     } catch (err) { toast.error(err.message); }
   };
 
@@ -101,6 +111,15 @@ export default function ModulesManager({ scope = 'admin' }) {
               <div className="between">
                 <strong>{m.position}. {m.title}</strong>
                 <div className="row" style={{ gap: 6 }}>
+                  {moduleQuizzesOn && (
+                    <Link
+                      className="btn btn-sm btn-ghost"
+                      title="Is module ke liye quiz banayein (anti-cheat ke saath, camera ke bina)"
+                      to={`${base}/quizzes?course=${courseId}&module=${m.id}`}
+                    >
+                      🧠 Quiz
+                    </Link>
+                  )}
                   <button className="btn btn-sm btn-ghost" onClick={() => { setLessonFor(m); setLessonForm({ title: '', description: '', video_url: '', content: '', duration_minutes: 10, position: m.lessons.length + 1, is_preview: 0 }); }}>➕ Lesson</button>
                   <button className="btn btn-sm btn-ghost" onClick={() => removeModule(m)}>🗑</button>
                 </div>
@@ -113,6 +132,7 @@ export default function ModulesManager({ scope = 'admin' }) {
                       <div className="tiny muted">{l.duration_minutes} min {l.video_url ? `• ${l.video_url.slice(0, 48)}` : ''}</div>
                     </div>
                     <div className="row" style={{ gap: 6 }}>
+                      <button className="btn btn-sm btn-ghost" title="Upload video / PDF" onClick={() => setMediaLesson(l)}>🎬 Media</button>
                       <button className="btn btn-sm btn-ghost" onClick={() => togglePreview(l)}>{l.is_preview ? '🔒' : '🔓'}</button>
                       <button className="btn btn-sm btn-ghost" onClick={() => removeLesson(l)}>🗑</button>
                     </div>
@@ -124,6 +144,22 @@ export default function ModulesManager({ scope = 'admin' }) {
           ))}
         </>
       )}
+
+      <Modal
+        open={!!mediaLesson}
+        title={`Video & PDF — ${mediaLesson ? mediaLesson.title : ''}`}
+        onClose={() => setMediaLesson(null)}
+        wide
+      >
+        {mediaLesson && (
+          <LessonMediaFields
+            lessonId={mediaLesson.id}
+            video={mediaLesson.video_upload || null}
+            pdf={mediaLesson.pdf_upload || null}
+            onChanged={() => loadCourse()}
+          />
+        )}
+      </Modal>
 
       <Modal open={moduleOpen} title="Add module" onClose={() => setModuleOpen(false)}>
         <form onSubmit={addModule}>

@@ -99,11 +99,11 @@ export default function SecondCamera() {
       }
     } catch (e) {
       if (e && (e.status === 404 || e.status === 403)) {
-        // Pairing link expired/rotated or the feature was switched off:
-        // retrying every five seconds will never succeed. Stop and tell
-        // the student exactly what to do instead.
+        // A disabled policy or expired bearer link cannot recover by retrying.
         stop();
-        setError('This pairing link is no longer active. On the quiz screen, use “Reconnect phone” / “New QR code” and scan the fresh code.');
+        setError(e.status === 403
+          ? 'The administrator has switched off the second camera for this attempt.'
+          : 'This pairing link has expired or was replaced. On the quiz screen, use “Reconnect phone” / “New QR code” and scan the fresh code.');
       } else {
         setError(e.message || 'The second-camera connection was interrupted.');
       }
@@ -166,11 +166,11 @@ export default function SecondCamera() {
       <main style={{ width: 'min(560px, 100%)', textAlign: 'center' }}>
         <div style={{ fontSize: '3.4rem' }}>📱</div>
         <h1 style={{ margin: '8px 0' }}>Second Camera</h1>
-        {info ? (
+        {info && info.enabled && info.student_name && info.quiz_title ? (
           <p style={{ color: 'rgba(255,255,255,.78)' }}>
             For <strong>{info.student_name}</strong> · {info.quiz_title}
           </p>
-        ) : !error ? <p style={{ color: 'rgba(255,255,255,.78)' }}>Checking pairing link…</p> : null}
+        ) : !info && !error ? <p style={{ color: 'rgba(255,255,255,.78)' }}>Checking pairing link…</p> : null}
 
         <video
           ref={videoRef}

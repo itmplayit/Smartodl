@@ -24,6 +24,16 @@ async function ensureColumn(table, column, ddl) {
   return false;
 }
 
+async function ensurePathType(table) {
+  const row = await q1(
+    'SELECT COLUMN_TYPE AS column_type FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=\'cert_type\'',
+    [table],
+  );
+  if (!row || String(row.column_type || '').includes("'path'")) return false;
+  await exec(`ALTER TABLE \`${table}\` MODIFY cert_type ENUM('course','quiz','contest','milestone','path') NOT NULL DEFAULT 'course'`);
+  return true;
+}
+
 /* ---------------------------------------------------------------- colours */
 
 /** '#fbbf24' -> '251,191,36'. Falls back to a neutral grey on bad input. */
@@ -76,9 +86,18 @@ const BUILT_INS = [
     color_accent: '#4ade80', color_accent_2: '#bbf7d0', color_accent_3: '#22c55e',
     color_seal_from: '#4ade80', color_seal_to: '#166534', color_seal_border: '#bbf7d0',
   },
+  {
+    slug: 'violet-programme', name: 'Violet — Programme Completion', cert_type: 'path',
+    headline: 'Programme Completed',
+    subtitle: 'for completing every required course in the programme:',
+    recipient_line: 'Awarded to', seal_text: '✓ PATH COMPLETE', label: 'Programme Completion',
+    color_bg_from: '#160d2e', color_bg_to: '#0b1020',
+    color_accent: '#a78bfa', color_accent_2: '#ddd6fe', color_accent_3: '#818cf8',
+    color_seal_from: '#a78bfa', color_seal_to: '#5b21b6', color_seal_border: '#ddd6fe',
+  },
 ];
 
-const CERT_TYPES = ['course', 'quiz', 'contest', 'milestone'];
+const CERT_TYPES = ['course', 'quiz', 'contest', 'milestone', 'path'];
 
 const TEXT_FIELDS = ['name', 'headline', 'subtitle', 'recipient_line', 'seal_text', 'label'];
 const COLOR_FIELDS = [
@@ -97,6 +116,7 @@ async function ensureSchema() {
     await ensureColumn('certificates', 'revoked_by', 'ADD COLUMN revoked_by INT UNSIGNED NULL AFTER revoked_at');
     await ensureColumn('certificates', 'revoke_reason', 'ADD COLUMN revoke_reason VARCHAR(255) NULL AFTER revoked_by');
   } catch (_) { /* certificates table is created by the base schema */ }
+  await ensurePathType('certificates');
   await exec(
     `CREATE TABLE IF NOT EXISTS certificate_templates (
        id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -125,6 +145,8 @@ async function ensureSchema() {
        KEY idx_ct_type (cert_type, is_default, is_active)
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   );
+
+  await ensurePathType('certificate_templates');
 
   const created = [];
   for (const t of BUILT_INS) {

@@ -50,6 +50,7 @@ const make = ({ prefix = 'api', ...opts }) => rateLimit({
 const isProctorTelemetry = (req) => {
   const path = String(req.originalUrl || req.url || '').split('?')[0];
   return /^\/api\/quiz-attempts\/[^/]+\/(?:proctor|proctor-frame|proctor-signal|proctor-ice|second-camera\/status)$/.test(path)
+    || (req.method === 'POST' && /^\/api\/proctor-recordings\/[^/]+\/(?:camera|screen)\/chunks\/\d+$/.test(path))
     || (req.method === 'POST' && /^\/api\/proctor\/second-camera\/[^/]+$/.test(path));
 };
 const userKey = (req) => `user:${(req.user && req.user.id) || 'anonymous'}`;

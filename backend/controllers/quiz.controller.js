@@ -13,8 +13,42 @@ const { buildQuestionOrder } = require('../utils/quiz-question-order');
 const { buildXlsx } = require('../utils/xlsx');
 const aiDetect = require('../services/aiDetection.service');
 const antiCheat = require('../services/anticheatSettings.service');
+const moduleQuiz = require('../services/moduleQuiz.service');
+
+/**
+ * Anti-cheat switches for one quiz's runner payload.
+ *
+ * A module quiz additionally gets the institutional floor from Feature Control:
+ * tab guard + fullscreen lockdown + copy-paste block + screenshot block, while
+ * camera and screen share are forced OFF. The floor is not a teacher preference,
+ * so a quiz creator cannot quietly weaken it.
+ */
+async function antiCheatModuleFloor(quiz) {
+  // One contract for every quiz: flags are booleans, not '1'/'0' strings.
+  const resolved = moduleQuiz.normaliseFlags(await antiCheat.resolveForUser(quiz.created_by));
+  if (!quiz || !quiz.module_id) return resolved;
+  const floor = await moduleQuiz.moduleAntiCheatFloor();
+  // Camera and screen share are NEVER negotiable for a module quiz — not even
+  // when the Feature Control floor switch is off. Off only means "use the
+  // creator's own tab-guard / lockdown / clipboard choices"; a module quiz that
+  // asked for a webcam would break the promise made to every student.
+  const merged = floor
+    ? moduleQuiz.applyAntiCheatFloor(resolved, floor)
+    : resolved;
+  return {
+    ...merged,
+    proctor_camera_enabled: false,
+    proctor_screen_enabled: false,
+    module_quiz: true,
+    enforced: true,
+    camera_allowed: false,
+    screen_allowed: false,
+  };
+}
 const { readBool, readSetting } = require('../services/settings.service');
 const liveProctor = require('../services/liveProctor.service');
+const proctorRecording = require('../services/proctorRecording.service');
+const integrityScore = require('../services/integrityScore.service');
 const proctorSvc = require('../services/proctoring.service');
 const iceServersSvc = require('../services/iceServers.service');
 const bcrypt = require('bcryptjs');
@@ -58,28 +92,22 @@ const publicQuiz = (quiz) => {
  */
 async function advancedProctorSettings() {
   const master = await readBool('proctor_advanced_enabled', false);
-  const entries = await Promise.all([
-    ['body', 'proctor_body_detection_enabled'],
-    ['headPose', 'proctor_head_pose_enabled'],
-    ['snapshot', 'proctor_live_snapshot_enabled'],
-    ['webrtc', 'proctor_live_webrtc_enabled'],
-    ['secondCamera', 'proctor_second_camera_enabled'],
-    ['roomScan', 'proctor_room_scan_enabled'],
-    ['identity', 'proctor_identity_check_enabled'],
-    ['mic', 'proctor_mic_monitoring_enabled'],
-    ['dualMonitor', 'proctor_dual_monitor_enabled'],
-    ['warnings', 'proctor_live_warnings_enabled'],
-  ].map(async ([name, key]) => [name, master && await readBool(key, false)]));
-  return { master, ...Object.fromEntries(entries) };
-}
-
-/** Advanced features may require sensors even when their basic switch is off. */
-function advancedSensorRequirements(settings) {
-  return {
-    camera: !!(settings.body || settings.headPose || settings.snapshot || settings.webrtc
-      || settings.roomScan || settings.identity),
-    screen: !!(settings.snapshot || settings.webrtc || settings.dualMonitor),
-  };
+  const [recording, entries] = await Promise.all([
+    readBool('proctor_recording_enabled', false),
+    Promise.all([
+      ['body', 'proctor_body_detection_enabled'],
+      ['headPose', 'proctor_head_pose_enabled'],
+      ['snapshot', 'proctor_live_snapshot_enabled'],
+      ['webrtc', 'proctor_live_webrtc_enabled'],
+      ['secondCamera', 'proctor_second_camera_enabled'],
+      ['roomScan', 'proctor_room_scan_enabled'],
+      ['identity', 'proctor_identity_check_enabled'],
+      ['mic', 'proctor_mic_monitoring_enabled'],
+      ['dualMonitor', 'proctor_dual_monitor_enabled'],
+      ['warnings', 'proctor_live_warnings_enabled'],
+    ].map(async ([name, key]) => [name, master && await readBool(key, false)])),
+  ]);
+  return { master, recording, ...Object.fromEntries(entries) };
 }
 
 /**
@@ -154,8 +182,37 @@ async function effectiveAdvancedForAttempt(attempt) {
     mic: eff.mic,
     dualMonitor: eff.dual_monitor,
     warnings: eff.warnings,
+    recording: eff.recording,
     policy,
     current,
+  };
+}
+
+async function clientProctorEventFeatures(attempt) {
+  const settings = await effectiveAdvancedForAttempt(attempt);
+  const policy = settings.policy;
+  if (!policy || !policy.live || !attempt || attempt.status !== 'in_progress') return {};
+  const creatorId = await antiCheat.quizCreatorId(attempt.quiz_id);
+  const [basicCamera, basicScreen] = await Promise.all([
+    antiCheat.resolveBoolForUser(creatorId, 'proctor_camera_enabled', false),
+    antiCheat.resolveBoolForUser(creatorId, 'proctor_screen_enabled', false),
+  ]);
+  const advancedCamera = settings.body || settings.headPose || settings.snapshot || settings.webrtc
+    || settings.roomScan || settings.identity || settings.recording;
+  return {
+    camera: !!(policy.camera_required && (basicCamera || advancedCamera)),
+    recording: settings.recording,
+    face: !!(policy.camera_required && basicCamera),
+    objects: !!(policy.camera_required && basicCamera),
+    screen: !!(policy.screen_required && (basicScreen || settings.snapshot || settings.webrtc || settings.recording)),
+    body: settings.body,
+    head_pose: settings.headPose,
+    live_view: settings.snapshot || settings.webrtc,
+    mic: settings.mic,
+    dual_monitor: settings.dualMonitor,
+    room_scan: settings.roomScan,
+    second_camera: settings.secondCamera,
+    identity: settings.identity,
   };
 }
 
@@ -187,6 +244,19 @@ const boundedQuizNumber = (value, fallback, min, max) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
 };
+
+/**
+ * Optional link that decides which course's certificate may show this quiz's
+ * integrity review band. Null clears the link.
+ */
+async function validatedCourseId(value) {
+  if (value === undefined || value === null || value === '' || value === 0 || value === '0') return null;
+  const id = Number(value);
+  if (!Number.isInteger(id) || id < 1) throw ApiError.badRequest('course_id is invalid');
+  const course = await q1('SELECT id FROM courses WHERE id = ?', [id]);
+  if (!course) throw ApiError.badRequest('course_id does not exist');
+  return id;
+}
 
 async function validatedCategoryId(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -370,13 +440,28 @@ const create = asyncHandler(async (req, res) => {
   // generated URL root falls back to a generic ASCII word.
   const slug = `${slugBase || 'quiz'}-${Date.now().toString().slice(-4)}`;
   const categoryId = await validatedCategoryId(b.category_id);
+  const courseId = await validatedCourseId(b.course_id);
+
+  // Module quiz: the module must belong to the same course, and a module quiz is
+  // always a normal quiz — live is the only type that can ask for a webcam or a
+  // screen share, and module quizzes must never do that.
+  if (b.module_id !== undefined && b.module_id !== null && b.module_id !== '') {
+    if (!(await moduleQuiz.featureEnabled())) {
+      throw ApiError.forbidden('Module quizzes are switched OFF in Feature Control');
+    }
+    await moduleQuiz.resolveModuleLink(b.module_id, courseId);
+    if (quizType === 'live') {
+      throw ApiError.badRequest('A module quiz cannot be a live quiz — module quizzes run with tab guard and lockdown, but never a camera or screen share');
+    }
+  }
+  const moduleId = b.module_id === undefined || b.module_id === '' ? null : (b.module_id === null ? null : Number(b.module_id));
 
   const result = await exec(
-    `INSERT INTO quizzes (title, slug, description, category_id, difficulty, quiz_type, negative_marking,
+    `INSERT INTO quizzes (title, slug, description, category_id, course_id, module_id, difficulty, quiz_type, negative_marking,
         time_limit_minutes, passing_score, start_at, end_at, max_participants, status, shuffle_questions,
         show_answers_after, allow_reattempt, is_private, access_password, created_by, is_premium)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [title, slug, b.description || null, categoryId, difficulty, quizType,
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [title, slug, b.description || null, categoryId, courseId, moduleId, difficulty, quizType,
       boundedQuizNumber(b.negative_marking, 0, 0, 100),
       Math.round(boundedQuizNumber(b.time_limit_minutes, 15, 1, 1440)),
       Math.round(boundedQuizNumber(b.passing_score, 40, 0, 100)), startAt, endAt,
@@ -399,14 +484,37 @@ const update = asyncHandler(async (req, res) => {
     throw ApiError.forbidden('⭐ Only an ADMIN may mark content as premium or remove that marking');
   }
 
-  const allowed = ['title', 'description', 'category_id', 'difficulty', 'quiz_type', 'negative_marking',
+  const allowed = ['title', 'description', 'category_id', 'course_id', 'difficulty', 'quiz_type', 'negative_marking',
     'time_limit_minutes', 'passing_score', 'start_at', 'end_at', 'max_participants', 'status',
-    'shuffle_questions', 'show_answers_after', 'allow_reattempt'];
+    'shuffle_questions', 'show_answers_after', 'allow_reattempt', 'module_id'];
   const data = {};
   allowed.forEach((key) => { if (req.body[key] !== undefined) data[key] = req.body[key]; });
   if (req.body.is_premium !== undefined) data.is_premium = req.body.is_premium ? 1 : 0;
   if (req.body.is_private !== undefined) data.is_private = req.body.is_private ? 1 : 0;
 
+  if (data.course_id !== undefined) data.course_id = await validatedCourseId(data.course_id);
+  if (data.module_id !== undefined) {
+    const nextCourseId = data.course_id !== undefined ? data.course_id : quiz.course_id;
+    if (data.module_id === null || data.module_id === '' || Number(data.module_id) === 0) {
+      data.module_id = null; // unlink the module, keep it a normal quiz
+    } else {
+      if (!(await moduleQuiz.featureEnabled())) {
+        throw ApiError.forbidden('Module quizzes are switched OFF in Feature Control');
+      }
+      const module = await moduleQuiz.resolveModuleLink(data.module_id, nextCourseId);
+      data.module_id = module.id;
+      // A module quiz can never be live: that is what keeps camera/screen share
+      // out of it. Refuse instead of silently switching the type.
+      const nextType = data.quiz_type !== undefined ? data.quiz_type : quiz.quiz_type;
+      if (nextType === 'live') {
+        throw ApiError.badRequest('Unlink the module before making this a live quiz — module quizzes never use a camera or screen share');
+      }
+    }
+  }
+  // Changing course while a module is linked must not orphan the link.
+  if (data.course_id !== undefined && data.module_id === undefined && quiz.module_id) {
+    await moduleQuiz.resolveModuleLink(quiz.module_id, data.course_id);
+  }
   if (data.title !== undefined) {
     data.title = String(data.title || '').trim().slice(0, 200);
     if (!data.title) throw ApiError.badRequest('Quiz title cannot be empty');
@@ -863,7 +971,7 @@ const recordViolation = asyncHandler(async (req, res) => {
  */
 const recordProctorEvents = asyncHandler(async (req, res) => {
   const attempt = await q1(
-    'SELECT id, quiz_id, user_id, status, proctor_violations, proctor_flags FROM quiz_attempts WHERE id = ?',
+    'SELECT id, quiz_id, user_id, status, proctor_violations, proctor_flags, proctor_policy FROM quiz_attempts WHERE id = ?',
     [req.params.id],
   );
   if (!attempt) throw ApiError.notFound('Attempt not found');
@@ -872,7 +980,8 @@ const recordProctorEvents = asyncHandler(async (req, res) => {
 
   // Source is explicit: this student endpoint may only mint client events.
   // Host/server attestations posted here are dropped inside recordEvents.
-  const result = await proctorSvc.recordEvents(attempt, req.body && req.body.events, { source: 'client' });
+  const enabledFeatures = await clientProctorEventFeatures(attempt);
+  const result = await proctorSvc.recordEvents(attempt, req.body && req.body.events, { source: 'client', enabledFeatures });
 
   // One number now carries the whole auto-submit decision: 0 (the default)
   // means never. Object detections never reach here as violations — they are
@@ -943,7 +1052,10 @@ const updateProctorFrame = asyncHandler(async (req, res) => {
   // Frozen policy ∩ live switches: snapshot must have been part of THIS
   // attempt's consent, and must not have been switched off since.
   const settings = await effectiveAdvancedForAttempt(attempt);
-  if (!settings.snapshot) return ok(res, { accepted: false, disabled: true });
+  if (!settings.snapshot) {
+    liveProctor.removeFrameKinds(attempt.id, ['camera', 'screen']);
+    return ok(res, { accepted: false, disabled: true });
+  }
   const kind = String((req.body && req.body.kind) || '');
   if (!['camera', 'screen'].includes(kind)) throw ApiError.badRequest('kind must be camera or screen');
   const saved = liveProctor.putFrame(attempt, kind, req.body && req.body.image);
@@ -960,24 +1072,40 @@ const getQuizProctorFrames = asyncHandler(async (req, res) => {
   assertCanHostQuiz(req, quiz);
   const settings = await advancedProctorSettings();
   const attempts = await q(
-    `SELECT id FROM quiz_attempts
+    `SELECT id, status, proctor_policy FROM quiz_attempts
       WHERE quiz_id = ? AND (status = 'in_progress' OR started_at >= COALESCE(?, '1970-01-02'))`,
     [quiz.id, quiz.live_started_at],
   );
   const secondCameras = {};
-  attempts.forEach((row) => {
-    secondCameras[String(row.id)] = liveProctor.secondCameraStatus(row.id);
-  });
   const since = Math.max(0, Number(req.query && req.query.since) || 0);
   const now = Date.now();
+  const frameData = settings.snapshot || settings.secondCamera
+    ? liveProctor.framesForQuiz(quiz.id, now, { since }) : {};
+  attempts.forEach((row) => {
+    const policy = proctorSvc.effectiveAdvancedPolicy(row.proctor_policy, settings);
+    const active = row.status === 'in_progress';
+    const allowSnapshot = active && !!policy.snapshot;
+    const allowSecond = active && !!policy.second_camera;
+    secondCameras[String(row.id)] = allowSecond
+      ? liveProctor.secondCameraStatus(row.id)
+      : { connected: false, ever_connected: false, last_frame_at: null };
+    const entry = frameData[String(row.id)];
+    if (!allowSnapshot) liveProctor.removeFrameKinds(row.id, ['camera', 'screen']);
+    if (!allowSecond) liveProctor.removeFrameKinds(row.id, ['second_camera']);
+    if (entry) {
+      if (!allowSnapshot) { entry.camera = null; entry.screen = null; }
+      if (!allowSecond) entry.second_camera = null;
+      if (!entry.camera && !entry.screen && !entry.second_camera) delete frameData[String(row.id)];
+    }
+    if (!allowSecond) liveProctor.removeSecondCameraSessions(row.id);
+  });
   return ok(res, {
     enabled: !!(settings.snapshot || settings.secondCamera),
     storage: 'memory-only',
     // Incremental polling: with `since`, only frames newer than the host's
     // last poll are returned; the host merges and ages out each feed by
     // its own timestamp/TTL below.
-    frames: settings.snapshot || settings.secondCamera
-      ? liveProctor.framesForQuiz(quiz.id, now, { since }) : {},
+    frames: frameData,
     frame_ttl_ms: liveProctor.FRAME_TTL_BY_KIND,
     server_time: now,
     second_cameras: secondCameras,
@@ -1025,12 +1153,34 @@ const secondCameraInfo = asyncHandler(async (req, res) => {
     [session.attemptId],
   );
   if (!row) throw ApiError.notFound('Attempt not found');
+  if (row.status !== 'in_progress') {
+    liveProctor.removeAttempt(session.attemptId);
+    return ok(res, {
+      attempt_status: row.status,
+      enabled: false,
+      connected: false,
+      ever_connected: false,
+      last_frame_at: null,
+    });
+  }
   const settings = await effectiveAdvancedForAttempt({ proctor_policy: row.proctor_policy });
+  if (!settings.secondCamera) {
+    // A disabled feature invalidates its bearer link and stops exposing
+    // student/quiz identifiers on the unauthenticated phone page.
+    liveProctor.removeSecondCameraSessions(session.attemptId);
+    return ok(res, {
+      attempt_status: row.status,
+      enabled: false,
+      connected: false,
+      ever_connected: false,
+      last_frame_at: null,
+    });
+  }
   return ok(res, {
     quiz_title: row.quiz_title,
     student_name: row.full_name,
     attempt_status: row.status,
-    enabled: !!settings.secondCamera,
+    enabled: true,
     ...liveProctor.secondCameraStatus(session.attemptId),
   });
 });
@@ -1041,9 +1191,15 @@ const updateSecondCameraFrame = asyncHandler(async (req, res) => {
   if (!session) throw ApiError.notFound('This second-camera link has expired');
   const attempt = await proctorAttemptRow(session.attemptId);
   if (!attempt) throw ApiError.notFound('Attempt not found');
-  if (attempt.status !== 'in_progress') return ok(res, { accepted: false, closed: true });
+  if (attempt.status !== 'in_progress') {
+    liveProctor.removeAttempt(attempt.id);
+    return ok(res, { accepted: false, closed: true });
+  }
   const settings = await effectiveAdvancedForAttempt(attempt);
-  if (!settings.secondCamera) throw ApiError.forbidden('Mobile second camera is disabled by the administrator');
+  if (!settings.secondCamera) {
+    liveProctor.removeSecondCameraSessions(attempt.id);
+    throw ApiError.forbidden('Mobile second camera is disabled by the administrator');
+  }
   // Record a fresh server attestation on first connection AND on reconnect
   // after an outage, so the timeline shows the gap actually closed.
   const wasFresh = !!(session.lastFrameAt && Date.now() - session.lastFrameAt <= 30 * 1000);
@@ -1072,14 +1228,16 @@ const proctorSignal = asyncHandler(async (req, res) => {
   const fromStudent = Number(attempt.user_id) === Number(req.user.id);
   const fromHost = !fromStudent && isQuizHost(req.user, quiz);
   if (!fromStudent && !fromHost) throw ApiError.forbidden('You cannot signal for this attempt');
-  const settings = await effectiveAdvancedForAttempt(attempt);
-  if (!settings.webrtc) throw ApiError.forbidden('Live WebRTC proctoring is disabled by the administrator');
-
   const body = req.body || {};
   const sessionId = String(body.session_id || '');
   const kind = String(body.kind || '');
   if (!/^[A-Za-z0-9_-]{8,96}$/.test(sessionId)) throw ApiError.badRequest('A valid session_id is required');
   if (!['offer', 'answer', 'candidate', 'focus', 'bye'].includes(kind)) throw ApiError.badRequest('Invalid signal kind');
+  const settings = await effectiveAdvancedForAttempt(attempt);
+  // Allow authenticated teardown even after the administrator withdraws the
+  // WebRTC feature; otherwise both peers close locally but stale relay state
+  // remains registered until its six-hour TTL.
+  if (!settings.webrtc && kind !== 'bye') throw ApiError.forbidden('Live WebRTC proctoring is disabled by the administrator');
   if (JSON.stringify(body).length > 80 * 1024) throw ApiError.badRequest('Signal is too large');
   if (body.sdp !== undefined && (typeof body.sdp !== 'string' || body.sdp.length > 64 * 1024)) {
     throw ApiError.badRequest('Invalid SDP');
@@ -1149,6 +1307,30 @@ const proctorHostAction = asyncHandler(async (req, res) => {
   const settings = await effectiveAdvancedForAttempt(attempt);
   const action = String((req.body && req.body.action) || '');
 
+  if (action === 'recording_start') {
+    if (!settings.recording) throw ApiError.forbidden('Saved recording is disabled by the administrator');
+    if (attempt.status !== 'in_progress') throw ApiError.badRequest('This attempt is already closed');
+    const requested = await proctorRecording.requestRecording(attempt, req.user.id);
+    events.publish('proctor_recording_request', {
+      attempt_id: Number(attempt.id),
+      session_id: requested.session_id,
+      requested_at: Date.now(),
+    }, { userId: Number(attempt.user_id) });
+    return ok(res, { action, ...requested, consent_required: true });
+  }
+
+  if (action === 'recording_stop') {
+    const latest = await proctorRecording.statusForAttempt(attempt.id);
+    if (!latest) throw ApiError.badRequest('There is no recording request for this attempt');
+    const stopped = await proctorRecording.requestStop(latest.session_id, attempt.id);
+    events.publish('proctor_recording_stop', {
+      attempt_id: Number(attempt.id),
+      session_id: latest.session_id,
+      at: Date.now(),
+    }, { userId: Number(attempt.user_id) });
+    return ok(res, { action, ...stopped });
+  }
+
   if (action === 'warning') {
     if (!settings.warnings) throw ApiError.forbidden('Live host warnings are disabled by the administrator');
     if (attempt.status !== 'in_progress') throw ApiError.badRequest('This attempt is already closed');
@@ -1166,6 +1348,9 @@ const proctorHostAction = asyncHandler(async (req, res) => {
 
   if (action === 'verify_identity') {
     if (!settings.identity) throw ApiError.forbidden('Identity checking is disabled by the administrator');
+    if (!(settings.snapshot || settings.webrtc)) {
+      throw ApiError.forbidden('Host visual verification requires an enabled live camera view');
+    }
     if (attempt.status !== 'in_progress') throw ApiError.badRequest('This attempt is already closed');
     await proctorSvc.recordEvents(attempt, [
       { type: 'identity_verified', detail: `verified by host user ${req.user.id}` },
@@ -1173,7 +1358,107 @@ const proctorHostAction = asyncHandler(async (req, res) => {
     return ok(res, { action, verified: true });
   }
 
-  throw ApiError.badRequest('action must be warning or verify_identity');
+  throw ApiError.badRequest('action must be recording_start, recording_stop, warning or verify_identity');
+});
+
+/** Resolve a student-owned attempt from its opaque recording session id. */
+async function assertStudentRecordingAttempt(req) {
+  const session = await q1(
+    'SELECT attempt_id FROM proctor_recording_sessions WHERE session_id=? AND user_id=?',
+    [req.params.sessionId, req.user.id],
+  );
+  if (!session) throw ApiError.notFound('Recording request not found');
+  const attempt = await q1('SELECT * FROM quiz_attempts WHERE id=? AND user_id=?', [session.attempt_id, req.user.id]);
+  if (!attempt) throw ApiError.notFound('Recording request not found');
+  return attempt;
+}
+
+/** Student consent and chunk upload for a host-requested recording. */
+const proctorRecordingConsent = asyncHandler(async (req, res) => {
+  const attempt = await assertStudentRecordingAttempt(req);
+  if (attempt.status !== 'in_progress') throw ApiError.badRequest('This attempt is already closed');
+  const accepted = !!(req.body && req.body.accepted === true);
+  const settings = await effectiveAdvancedForAttempt(attempt);
+  if (accepted && !settings.recording) {
+    await proctorRecording.consentRecording({ sessionId: req.params.sessionId, attemptId: attempt.id, userId: req.user.id, accepted: false });
+    throw ApiError.forbidden('Saved recording is disabled by the administrator');
+  }
+  const result = await proctorRecording.consentRecording({
+    sessionId: req.params.sessionId,
+    attemptId: attempt.id,
+    userId: req.user.id,
+    accepted,
+    mimeTypes: (req.body && req.body.mime_types) || {},
+  });
+  return ok(res, result);
+});
+
+const proctorRecordingChunk = asyncHandler(async (req, res) => {
+  const attempt = await assertStudentRecordingAttempt(req);
+  if (attempt.status !== 'in_progress') throw ApiError.badRequest('This attempt is already closed');
+  const settings = await effectiveAdvancedForAttempt(attempt);
+  if (!settings.recording) {
+    await proctorRecording.failRecording(req.params.sessionId, attempt.id, req.user.id);
+    throw ApiError.forbidden('Saved recording has been switched off');
+  }
+  const result = await proctorRecording.appendChunk({
+    sessionId: req.params.sessionId,
+    attemptId: attempt.id,
+    userId: req.user.id,
+    feed: req.params.feed,
+    chunkIndex: req.params.chunkIndex,
+    mimeType: req.get('content-type'),
+    chunk: req.body,
+  });
+  return ok(res, result);
+});
+
+const proctorRecordingFinalize = asyncHandler(async (req, res) => {
+  const attempt = await assertStudentRecordingAttempt(req);
+  const result = await proctorRecording.finalizeRecording({
+    sessionId: req.params.sessionId,
+    attemptId: attempt.id,
+    userId: req.user.id,
+    durations: (req.body && req.body.durations) || {},
+    interrupted: !!(req.body && req.body.interrupted),
+  });
+  return ok(res, result);
+});
+
+const getProctorRecordingStatus = asyncHandler(async (req, res) => {
+  const attempt = await proctorAttemptRow(req.params.id);
+  if (!attempt) throw ApiError.notFound('Attempt not found');
+  if (Number(attempt.user_id) !== Number(req.user.id)) {
+    const quiz = await q1('SELECT * FROM quizzes WHERE id = ?', [attempt.quiz_id]);
+    assertCanHostQuiz(req, quiz);
+  }
+  return ok(res, await proctorRecording.statusForAttempt(attempt.id));
+});
+
+const adminProctorRecordings = asyncHandler(async (req, res) => {
+  const rows = await proctorRecording.listAdmin({ limit: req.query.limit });
+  return ok(res, rows);
+});
+
+const adminIntegrityScores = asyncHandler(async (req, res) => {
+  const enabled = await readBool('integrity_score_enabled', true);
+  if (!enabled) return ok(res, { enabled: false, rows: [] });
+  const rows = await integrityScore.listAdminScores({ limit: req.query.limit });
+  return ok(res, { enabled: true, rows });
+});
+
+const streamAdminProctorRecording = asyncHandler(async (req, res) => {
+  const file = await proctorRecording.fileForAdmin(req.params.fileId);
+  res.setHeader('Content-Type', file.mime_type || 'video/webm');
+  const extension = String(file.mime_type || '').toLowerCase().startsWith('video/mp4') ? 'mp4' : 'webm';
+  res.setHeader('Content-Disposition', `inline; filename="recording-${file.feed}.${extension}"`);
+  res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  return res.sendFile(file.absolutePath);
+});
+
+const deleteAdminProctorRecording = asyncHandler(async (req, res) => {
+  return ok(res, await proctorRecording.deleteAdminSession(req.params.sessionId));
 });
 
 /** POST /api/quiz-attempts/:id/ping — presence heartbeat.
@@ -1291,6 +1576,13 @@ u.full_name, u.email, u.college, u.avatar,
     const [{ n }] = await q('SELECT COUNT(*) AS n FROM quiz_questions WHERE quiz_id = ?', [quiz.id]);
     if (n > 0) totalQuestions = Number(n);
   } catch (_) { /* fall back to quiz.question_count */ }
+  // Integrity scores are admin-only and are added only when the master switch
+  // is enabled. Never expose these review signals to developer hosts.
+  const isAdminViewer = ['owner', 'admin'].includes(req.user.role);
+  const canSeeIntegrityScore = isAdminViewer && await readBool('integrity_score_enabled', true);
+  const liveIntegrityScores = canSeeIntegrityScore
+    ? await integrityScore.scoresForAttempts(participants)
+    : new Map();
   const withPresence = participants.map((p) => {
     let presence = 'active';
     if (p.status !== 'in_progress') presence = 'submitted';
@@ -1320,6 +1612,7 @@ u.full_name, u.email, u.college, u.avatar,
       // Parsed once here so the host monitor can tell which advanced
       // transports THIS attempt actually consented to.
       proctor_policy: proctorSvc.parseProctorPolicy(p.proctor_policy),
+      ...(canSeeIntegrityScore ? { integrity_review: liveIntegrityScores.get(Number(p.id)) } : {}),
     };
   });
   ok(res, {
@@ -1334,6 +1627,7 @@ u.full_name, u.email, u.college, u.avatar,
       total_questions: totalQuestions,
       total_marks: Number(quiz.total_marks) || 0,
       max_participants: quiz.max_participants,
+      ...(isAdminViewer ? { integrity_score_enabled: canSeeIntegrityScore } : {}),
       join_url: `/quizzes/${quiz.id}/live`,
       window_open: !quiz.end_at || new Date(quiz.end_at) > new Date(),
     },
@@ -1737,6 +2031,11 @@ const startAttempt = asyncHandler(async (req, res) => {
   }
   const quiz = await q1('SELECT * FROM quizzes WHERE id = ?', [req.params.id]);
   if (!quiz) throw ApiError.notFound('Quiz not found');
+  // Defensive: a module quiz must never run as a live quiz, because live is the
+  // only mode that can demand a webcam or a screen share.
+  if (quiz.module_id && quiz.quiz_type === 'live') {
+    throw ApiError.forbidden('This module quiz is misconfigured — a module quiz never uses a camera or screen share. Ask an instructor to unlink the module or change the quiz type.');
+  }
   if (Number(quiz.is_private)) {
     const unlocked = verifyQuizUnlock(req.headers['x-quiz-unlock'], {
       userId: req.user.id, quizId: quiz.id, accessPasswordHash: quiz.access_password,
@@ -1797,6 +2096,15 @@ const startAttempt = asyncHandler(async (req, res) => {
   } else if (quiz.end_at && new Date(quiz.end_at).getTime() < Date.now()) {
     throw ApiError.forbidden('This quiz has already ended');
   }
+
+  // A dead attempt from an earlier session must not be resumed forever: settle
+  // it first (grade what was saved, or abandon it), then the normal join rules
+  // apply — so "Try again" always opens something the student can actually write to.
+  try {
+    await require('../services/quizAttempts.service').settleExpiredAttempts({
+      quizId: quiz.id, userId: req.user.id,
+    });
+  } catch (error) { console.warn('[quiz-attempts] settle on start failed:', error.message); }
 
   const startOutcome = await tx(async (conn) => {
     // Lock the quiz row for the whole join decision. Capacity was formerly
@@ -1906,7 +2214,7 @@ async function attemptPayload(attempt, quiz) {
   const host = await q1('SELECT full_name FROM users WHERE id = ? LIMIT 1', [quiz.live_host_id || quiz.created_by]);
   // Anti-cheat resolves per quiz CREATOR, not globally: each developer's
   // own switches govern their quizzes (admin globals are only the fallback).
-  const effectiveAntiCheat = await antiCheat.resolveForUser(quiz.created_by);
+  const effectiveAntiCheat = await antiCheatModuleFloor(quiz);
   return {
     attempt,
     question_assignment: {
@@ -1922,6 +2230,8 @@ async function attemptPayload(attempt, quiz) {
       id: quiz.id, title: quiz.title, time_limit_minutes: quiz.time_limit_minutes,
       negative_marking: quiz.negative_marking, end_at: quiz.end_at,
       quiz_type: quiz.quiz_type, status: quiz.status, live_started_at: quiz.live_started_at,
+      module_id: quiz.module_id || null,
+      course_id: quiz.course_id || null,
       host_name: host ? host.full_name : null,
     },
     questions: lobby ? [] : safeQuestions,
@@ -2033,7 +2343,7 @@ const runAttemptCode = asyncHandler(async (req, res) => {
 
 /** Grade one attempt from the stored answers + question keys. */
 async function evaluateAttempt(attemptId) {
-  return tx(async (conn) => {
+  const result = await tx(async (conn) => {
     const [[attempt]] = await conn.query('SELECT * FROM quiz_attempts WHERE id = ? FOR UPDATE', [attemptId]);
     if (!attempt) throw ApiError.notFound('Attempt not found');
     if (attempt.status === 'evaluated') {
@@ -2178,6 +2488,16 @@ async function evaluateAttempt(attemptId) {
     }
     return { score, total, correct, wrong, unattempted, accuracy, seconds, passed, rank: rows.findIndex((r) => Number(r.id) === Number(attemptId)) + 1 };
   });
+  try {
+    const attempt = await q1('SELECT user_id FROM quiz_attempts WHERE id=?', [attemptId]);
+    const stopped = await proctorRecording.stopAttempt(attemptId);
+    for (const session of stopped) {
+      events.publish('proctor_recording_stop', {
+        attempt_id: Number(attemptId), session_id: session.session_id, at: Date.now(),
+      }, { userId: Number(attempt.user_id) });
+    }
+  } catch (error) { console.warn('[proctor-recording] attempt-end stop failed:', error.message); }
+  return result;
 }
 
 const submitAttempt = asyncHandler(async (req, res) => {
@@ -2299,12 +2619,16 @@ const submitAttempt = asyncHandler(async (req, res) => {
   try {
     const policy = proctorSvc.parseProctorPolicy(attempt.proctor_policy);
     if (policy) {
+      // Missing-check findings obey the same frozen-policy ∩ current-switch
+      // rule as live transports. Turning a check OFF mid-attempt must not
+      // create a submit-time violation for an obligation that was withdrawn.
+      const features = await clientProctorEventFeatures({ ...attempt, proctor_policy: policy });
       await proctorSvc.closeAttempt(attempt.id, {
-        cameraRequired: policy.camera_required,
-        screenRequired: policy.screen_required,
-        secondCameraRequired: policy.advanced.second_camera,
-        roomScanRequired: policy.advanced.room_scan,
-        identityRequired: policy.advanced.identity,
+        cameraRequired: features.camera,
+        screenRequired: features.screen,
+        secondCameraRequired: features.second_camera,
+        roomScanRequired: features.room_scan,
+        identityRequired: features.identity,
       });
     } else if (__quizEarly && __quizEarly.quiz_type === 'live') {
       // Legacy attempts opened before policy snapshots existed keep the old
@@ -2345,7 +2669,14 @@ const submitAttempt = asyncHandler(async (req, res) => {
       ? `You scored ${result.score}/${result.total} (${result.accuracy}%) — a Certificate of Excellence has been issued!`
       : `You scored ${result.score}/${result.total} (${result.accuracy}% accuracy, rank #${result.rank}).`,
   });
-  ok(res, { ...result, certificate: quizCert ? { certificate_no: quizCert.certificate_no, token: quizCert.public_token } : null });
+  ok(res, {
+    ...result,
+    // `total` has been the wire name since day one; `total_marks` is the same
+    // number under the name every other quiz payload uses, so no client has to
+    // guess which one to read.
+    total_marks: result.total,
+    certificate: quizCert ? { certificate_no: quizCert.certificate_no, token: quizCert.public_token } : null,
+  });
 });
 
 const myAttempts = asyncHandler(async (req, res) => {
@@ -2401,7 +2732,7 @@ const attemptDetail = asyncHandler(async (req, res) => {
   // runner redirects back to the waiting room on `lobby: true`. Hosts keep
   // full visibility for monitoring.
   const lobby = !canManage && isLiveLobby(quiz);
-  const effectiveAntiCheat = await antiCheat.resolveForUser(quiz.created_by);
+  const effectiveAntiCheat = await antiCheatModuleFloor(quiz);
   // Only the student's own runner load may freeze the policy — a host
   // peeking at the attempt must not snapshot rules the student has not
   // been shown yet.
@@ -2433,6 +2764,9 @@ module.exports = {
   recordViolation, recordProctorEvents, proctorReport, updateProctorFrame,
   getQuizProctorFrames, createSecondCameraSession, getSecondCameraStatus,
   secondCameraInfo, updateSecondCameraFrame, proctorSignal, getProctorIceServers, proctorHostAction,
+  proctorRecordingConsent, proctorRecordingChunk, proctorRecordingFinalize,
+  getProctorRecordingStatus, adminProctorRecordings, adminIntegrityScores, streamAdminProctorRecording,
+  deleteAdminProctorRecording,
   pingAttempt, unlock,
   evaluateAttempt,   // consumed by the housekeeping sweep in server.js
 };

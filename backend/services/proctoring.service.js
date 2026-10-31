@@ -77,6 +77,7 @@ const EVENTS = {
   body_out_of_frame:  { weight: 0, label: 'Body is poorly framed or partly out of view' },
   looking_away:       { weight: 0, label: 'Head turned away from the screen' },
   body_check_unavailable: { weight: 0, label: 'Body detection could not load' },
+  head_pose_check_unavailable: { weight: 0, label: 'Browser cannot provide head-pose geometry' },
   mic_granted:        { weight: 0, label: 'Microphone allowed' },
   mic_denied:         { weight: 1, label: 'Microphone permission refused' },
   mic_off:            { weight: 1, label: 'Microphone stopped mid-exam' },
@@ -116,6 +117,11 @@ const ADVISORY_FLAG_EVENTS = [
   'multiple_displays_detected',
   'host_warning_sent',
   'identity_verified',
+  'face_check_unsupported',
+  'body_check_unavailable',
+  'head_pose_check_unavailable',
+  'object_check_unavailable',
+  'dual_monitor_check_unavailable',
 ];
 
 const EVENT_KEYS = Object.keys(EVENTS);
@@ -141,6 +147,36 @@ const CLIENT_EVENTS = new Set(EVENT_KEYS.filter(
   (type) => !HOST_ONLY_EVENTS.has(type) && !SERVER_ONLY_EVENTS.has(type),
 ));
 
+/**
+ * Every student-minted event is tied to the switch/sensor that authorises it.
+ * These checks are server-side: a modified browser cannot fabricate evidence
+ * for a disabled feature or an attempt whose frozen policy did not include it.
+ */
+const EVENT_FEATURE_REQUIREMENTS = {
+  camera_granted: 'camera', camera_denied: 'camera', camera_off: 'camera',
+  camera_resumed: 'camera', camera_dark: 'camera', camera_frozen: 'camera',
+  no_face: 'face', multiple_faces: 'face', face_check_unsupported: 'face',
+  screen_granted: 'screen', screen_denied: 'screen', screen_stopped: 'screen',
+  screen_resumed: 'screen', screen_wrong_surface: 'screen',
+  phone_detected: 'objects', book_detected: 'objects', device_detected: 'objects',
+  object_check_unavailable: 'objects',
+  body_missing: 'body', multiple_people: 'body', body_out_of_frame: 'body',
+  body_check_unavailable: 'body', head_pose_check_unavailable: 'head_pose', looking_away: 'head_pose',
+  live_view_started: 'live_view',
+  mic_granted: 'mic', mic_denied: 'mic', mic_off: 'mic', mic_resumed: 'mic',
+  voice_detected: 'mic',
+  multiple_displays_detected: 'dual_monitor',
+  dual_monitor_check_unavailable: 'dual_monitor',
+  room_scan_started: 'room_scan', room_scan_completed: 'room_scan',
+  second_camera_disconnected: 'second_camera',
+  identity_check_completed: 'identity',
+};
+
+function eventAllowedByFeatures(type, enabledFeatures = {}) {
+  const feature = EVENT_FEATURE_REQUIREMENTS[type];
+  return !!feature && !!enabledFeatures[feature];
+}
+
 function eventsForSource(source = 'client') {
   if (source === 'host') return HOST_ONLY_EVENTS;
   if (source === 'server') return SERVER_ONLY_EVENTS;
@@ -156,7 +192,7 @@ function eventsForSource(source = 'client') {
  * camera/screen/second-camera requirement halfway through the paper. */
 const ADVANCED_POLICY_KEYS = [
   'master', 'body', 'head_pose', 'snapshot', 'webrtc', 'second_camera',
-  'room_scan', 'identity', 'mic', 'dual_monitor', 'warnings',
+  'room_scan', 'identity', 'mic', 'dual_monitor', 'warnings', 'recording',
 ];
 
 function emptyAdvancedPolicy() {
@@ -189,6 +225,7 @@ function normalizeAdvancedPolicy(raw = {}) {
     mic: !!source.mic,
     dual_monitor: pick('dual_monitor', 'dualMonitor'),
     warnings: !!source.warnings,
+    recording: !!source.recording,
   };
 }
 
@@ -216,8 +253,10 @@ function parseProctorPolicy(raw) {
 function advancedSensorRequirements(advanced = {}) {
   const a = normalizeAdvancedPolicy(advanced);
   return {
-    camera: !!(a.body || a.head_pose || a.snapshot || a.webrtc || a.room_scan || a.identity),
-    screen: !!(a.snapshot || a.webrtc || a.dual_monitor),
+    camera: !!(a.body || a.head_pose || a.snapshot || a.webrtc || a.room_scan || a.identity || a.recording),
+    // Display-count APIs (getScreenDetails / screen.isExtended) do not need
+    // a display-capture stream; recording, snapshot and WebRTC do.
+    screen: !!(a.snapshot || a.webrtc || a.recording),
   };
 }
 
@@ -249,7 +288,15 @@ function effectiveAdvancedPolicy(policy, currentAdvanced = {}) {
   const out = emptyAdvancedPolicy();
   ADVANCED_POLICY_KEYS.forEach((key) => { out[key] = !!(frozen.advanced[key] && current[key]); });
   out.master = !!(frozen.advanced.master && current.master);
-  if (!out.master) return emptyAdvancedPolicy();
+  // Recording has its own admin main switch and may be enabled independently
+  // of the live-view/detection master, but is still frozen per attempt.
+  const recording = !!(frozen.advanced.recording && current.recording);
+  if (!out.master) {
+    const onlyRecording = emptyAdvancedPolicy();
+    onlyRecording.recording = recording;
+    return onlyRecording;
+  }
+  out.recording = recording;
   return out;
 }
 
@@ -315,7 +362,7 @@ async function ensureSchema() {
  * The client batches rather than posting per event, so a flaky camera cannot
  * be used to hammer the API. Everything is clamped and whitelisted here.
  */
-async function recordEvents(attempt, rawEvents, { source = 'client' } = {}) {
+async function recordEvents(attempt, rawEvents, { source = 'client', enabledFeatures = {} } = {}) {
   const weightOf = (type) => EVENTS[type].weight;
   const allowed = eventsForSource(source);
   const list = (Array.isArray(rawEvents) ? rawEvents : []).slice(0, 40);
@@ -326,7 +373,9 @@ async function recordEvents(attempt, rawEvents, { source = 'client' } = {}) {
     // Unknown types AND types this source may not mint are both dropped: a
     // student posting "identity_verified" must be exactly as ineffective as
     // a student posting a made-up event name.
-    if (!allowed.has(type)) { rejected += 1; continue; }
+    if (!allowed.has(type) || (source === 'client' && !eventAllowedByFeatures(type, enabledFeatures))) {
+      rejected += 1; continue;
+    }
     const detail = raw && raw.detail != null ? String(raw.detail).slice(0, 255) : null;
     accepted.push({ type, detail });
   }
@@ -460,6 +509,7 @@ module.exports = {
   ensureSchema, recordEvents, closeAttempt, summaryFor, timelineFor,
   EVENTS, EVENT_KEYS, OBJECT_EVENTS, ADVISORY_FLAG_EVENTS,
   CLIENT_EVENTS, HOST_ONLY_EVENTS, SERVER_ONLY_EVENTS, eventsForSource,
+  EVENT_FEATURE_REQUIREMENTS, eventAllowedByFeatures,
   emptyProctorPolicy, normalizeProctorPolicy, parseProctorPolicy,
   buildProctorPolicy, effectiveAdvancedPolicy, joinFlags,
 };

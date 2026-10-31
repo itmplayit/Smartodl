@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { courseApi, miscApi } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 import { CourseCard, Empty, ErrorBox, Loader, Pagination } from '../components/ui';
 import { COURSE_DIFFICULTIES } from '../utils/constants';
 
 export default function Courses() {
+  const { user } = useAuth();
+  const [suggested, setSuggested] = useState([]);
   const [courses, setCourses] = useState(null);
   const [meta, setMeta] = useState(null);
   const [cats, setCats] = useState([]);
@@ -21,6 +25,16 @@ export default function Courses() {
   useEffect(() => { load(filters); /* eslint-disable-next-line */ }, [filters]);
   useEffect(() => { miscApi.categories().then(({ data }) => setCats(data.data.filter((c) => ['course', 'all'].includes(c.type)))).catch(() => {}); }, []);
 
+  useEffect(() => {
+    if (!user) { setSuggested([]); return undefined; }
+    let alive = true;
+    // Suggestions are advisory; if they fail the catalogue still renders.
+    courseApi.recommended()
+      .then(({ data }) => { if (alive) setSuggested(data.data || []); })
+      .catch(() => { if (alive) setSuggested([]); });
+    return () => { alive = false; };
+  }, [user]);
+
   const set = (patch) => setFilters((f) => ({ ...f, page: 1, ...patch }));
 
   return (
@@ -29,6 +43,35 @@ export default function Courses() {
         <div><span className="eyebrow">Catalogue</span><h1>Explore courses</h1>
           <p className="muted small">Structured video lessons, notes, quizzes and coding practice for every subject.</p></div>
       </div>
+
+      {suggested.length > 0 && (
+        <section className="mb" aria-label="Suggested courses">
+          <span className="eyebrow">Suggested for you</span>
+          <p className="muted small" style={{ marginTop: 4 }}>
+            Based only on the categories of courses you have completed. Suggestions, not a judgement of your skills.
+          </p>
+          <div className="grid g3">
+            {suggested.map((course) => (
+              <article className="card hover" key={course.id}>
+                <div className="between mb-s">
+                  {course.category_name && <span className="tag">{course.category_name}</span>}
+                  <span className="tag">{course.difficulty}</span>
+                </div>
+                <h3 style={{ fontSize: '1.05rem' }}>{course.title}</h3>
+                <p className="muted small">{course.summary || 'A course on SmartODL.'}</p>
+                {Array.isArray(course.reasons) && course.reasons.length > 0 && (
+                  <ul className="tiny muted" style={{ paddingLeft: 18, margin: '8px 0 0' }}>
+                    {course.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+                  </ul>
+                )}
+                <Link className="btn btn-primary btn-block mt" to={`/courses/${course.slug || course.id}`}>
+                  View course →
+                </Link>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
 
       <div className="card mb">
         <div className="form-grid">

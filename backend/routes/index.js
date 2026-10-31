@@ -15,11 +15,13 @@ const misc = require('../controllers/misc.controller');
 const certs = require('../controllers/certificate.controller');
 const landingBuilder = require('../controllers/landing-builder.controller');
 const subs = require('../controllers/subscription.controller');
+const lessonMedia = require('../controllers/lessonMedia.controller');
 
 const { authenticate, optionalAuth, authorize, requirePermission } = require('../middleware/auth');
 const {
   notesUpload, imageUpload, avatarUpload, bannerUpload, landingMediaUpload,
-  validateRasterImage, validateNoteFile,
+  lessonVideoUpload, lessonPdfUpload,
+  validateRasterImage, validateNoteFile, validateLessonVideo, validateLessonPdf,
 } = require('../middleware/upload');
 const {
   authLimiter, executionLimiter, submitLimiter, writeLimiter, certLimiter,
@@ -164,6 +166,9 @@ router.put('/categories/:id', ...adminOnly, require('../controllers/crud.control
 router.delete('/categories/:id', ...adminOnly, require('../controllers/crud.controller').categories.remove);
 
 /* -------------------------------- courses -------------------------------- */
+router.get('/courses/recommended', authenticate, courses.recommendedCourses);
+router.get('/courses/:id/analytics.xlsx', ...staff, requirePermission('view_student_data'), courses.courseAnalyticsXlsx);
+router.get('/courses/:id/analytics', ...staff, requirePermission('view_student_data'), courses.courseAnalytics);
 router.get('/courses', optionalAuth, courses.listCourses);
 router.post('/courses', authenticate, authorize('admin', 'developer'), requirePermission('create_course'), writeLimiter, courses.createCourse);
 router.get('/courses/:id', optionalAuth, courses.getCourse);
@@ -182,6 +187,19 @@ router.delete('/modules/:id', ...staff, requirePermission('delete_course'), cour
 router.post('/lessons', ...staff, requirePermission('create_course'), writeLimiter, courses.createLesson);
 router.put('/lessons/reorder', ...staff, requirePermission('edit_course'), courses.reorderLessons);
 router.get('/lessons/:id', optionalAuth, courses.getLesson);
+/* Lesson media: uploads are staff-only; playback is gated per request (see
+   lessonAccess.service) because <video>/<iframe> cannot send a bearer token. */
+router.get('/lessons/:id/media', optionalAuth, lessonMedia.mediaInfo);
+router.get('/lessons/:id/video', optionalAuth, lessonMedia.streamVideo);
+router.get('/lessons/:id/pdf', optionalAuth, lessonMedia.viewPdf);
+/* Watch coverage: the player reports progress; "mark complete" is gated by it
+   when the course's completion policy asks for watch coverage. */
+router.post('/lessons/:id/watch', optionalAuth, writeLimiter, lessonMedia.reportWatch);
+router.get('/lessons/:id/watch', optionalAuth, lessonMedia.watchStatus);
+router.post('/lessons/:id/video', ...staff, requirePermission('edit_course'), writeLimiter, lessonVideoUpload.single('video'), validateLessonVideo, lessonMedia.uploadVideo);
+router.post('/lessons/:id/pdf', ...staff, requirePermission('edit_course'), writeLimiter, lessonPdfUpload.single('pdf'), validateLessonPdf, lessonMedia.uploadPdf);
+router.delete('/lessons/:id/video', ...staff, requirePermission('edit_course'), lessonMedia.removeVideo);
+router.delete('/lessons/:id/pdf', ...staff, requirePermission('edit_course'), lessonMedia.removePdf);
 router.put('/lessons/:id', ...staff, requirePermission('edit_course'), courses.updateLesson);
 router.delete('/lessons/:id', ...staff, requirePermission('delete_course'), courses.removeLesson);
 
@@ -289,6 +307,14 @@ router.post('/quiz-attempts/:id/proctor-frame', authenticate, authorize('student
 router.post('/quiz-attempts/:id/proctor-signal', authenticate, proctorSignalLimiter, quizzes.proctorSignal);
 router.get('/quiz-attempts/:id/proctor-ice', authenticate, proctorStatusLimiter, quizzes.getProctorIceServers);
 router.post('/quiz-attempts/:id/proctor-action', ...staff, writeLimiter, quizzes.proctorHostAction);
+router.get('/quiz-attempts/:id/proctor-recording/status', authenticate, proctorStatusLimiter, quizzes.getProctorRecordingStatus);
+router.post('/proctor-recordings/:sessionId/consent', authenticate, authorize('student'), writeLimiter, quizzes.proctorRecordingConsent);
+router.post('/proctor-recordings/:sessionId/:feed/chunks/:chunkIndex', authenticate, authorize('student'), proctorFrameLimiter, express.raw({ type: ['video/webm', 'video/mp4'], limit: '8mb' }), quizzes.proctorRecordingChunk);
+router.post('/proctor-recordings/:sessionId/finalize', authenticate, authorize('student'), writeLimiter, quizzes.proctorRecordingFinalize);
+router.get('/admin/proctor-recordings', ...adminOnly, quizzes.adminProctorRecordings);
+router.get('/admin/integrity-scores', ...adminOnly, quizzes.adminIntegrityScores);
+router.get('/admin/proctor-recordings/files/:fileId', ...adminOnly, quizzes.streamAdminProctorRecording);
+router.delete('/admin/proctor-recordings/:sessionId', ...adminOnly, writeLimiter, quizzes.deleteAdminProctorRecording);
 router.post('/quiz-attempts/:id/second-camera/session', authenticate, authorize('student'), writeLimiter, quizzes.createSecondCameraSession);
 router.get('/quiz-attempts/:id/second-camera/status', authenticate, proctorStatusLimiter, quizzes.getSecondCameraStatus);
 router.get('/proctor/second-camera/:token', certLimiter, quizzes.secondCameraInfo);

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { miscApi, quizApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { useSettings } from '../context/SettingsContext';
 import { useToast } from '../context/ToastContext';
 import { Badge, Countdown, Empty, Loader, StatusBadge, StatCard } from '../components/ui';
 import JsonImportPrompt from '../components/JsonImportPrompt';
@@ -51,6 +52,8 @@ export default function LiveHostPanel({ scope = 'admin' }) {
   const { id } = useParams();
   const toast = useToast();
   const { user, can, hasRole } = useAuth();
+  const { isOn } = useSettings();
+  const savedRecordingEnabled = isOn('proctor_recording_enabled', false);
   /* Anti-cheat used to be admin-only, which meant the instructor actually
      running the exam had to call an admin to turn lockdown on. A developer
      granted `manage_anticheat` can now do it from here — and the switches
@@ -343,6 +346,9 @@ export default function LiveHostPanel({ scope = 'admin' }) {
   // pressed "Start for everyone" yet — nobody's timer is running.
   const lobbyOpen = quiz.status === 'live' && live && !live.quiz.live_started_at;
   const participants = (live && live.participants) || [];
+  // Integrity review scores are admin-only; the API omits them entirely for
+  // developer hosts and when the global review-score switch is OFF.
+  const showIntegrityScore = hasRole('admin') && !!(live && live.quiz && live.quiz.integrity_score_enabled);
   /* Denominators for the monitor. `live.quiz.total_questions` is counted from
      quiz_questions by the API; quizzes.question_count can drift if questions
      were added or removed without syncQuizTotals, so prefer the counted one. */
@@ -459,7 +465,7 @@ export default function LiveHostPanel({ scope = 'admin' }) {
               <span className="small">Guard enabled</span>
             </label>
             <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-              <span className="small">Max tab switches</span>
+              <span className="small">Max guard violations</span>
               <input className="input" type="number" min="1" max="20" defaultValue={guard.max} key={guard.max}
                 disabled={!canGuard} style={{ width: 74, padding: '6px 8px' }}
                 onBlur={(e) => { const v = Math.min(20, Math.max(1, Number(e.target.value) || 1)); if (v !== guard.max) saveGuard({ max: v }); }} />
@@ -483,6 +489,11 @@ export default function LiveHostPanel({ scope = 'admin' }) {
         participants={participants}
         active={quiz.status === 'live' && !lobbyOpen}
       />
+      {quiz.status === 'live' && !savedRecordingEnabled && (
+        <div className="soft small mt" role="status">
+          ⏺ Saved recording is currently OFF. An administrator must enable <strong>Feature Control → Saved Proctor Recordings</strong> before a new student attempt starts. The Advanced Proctoring master switch is separate.
+        </div>
+      )}
 
       <div className="card mt">
         <div className="between mb-s">
@@ -506,7 +517,7 @@ export default function LiveHostPanel({ scope = 'admin' }) {
         {participants.length > 0 && (
           <div className="table-wrap" tabIndex={0}>
             <table className="table">
-              <thead><tr><th>Student</th><th>Status</th><th>Answered</th><th>Score</th><th>Accuracy</th><th>⚠ Tab switches</th><th title="Webcam / screen-share proctoring. Shows nothing when proctoring is switched off for this site.">🎥 Proctoring</th><th title="AI detection result, scored when the paper is submitted. Advisory only.">🤖 AI Detect</th><th>Progress</th></tr></thead>
+              <thead><tr><th>Student</th><th>Status</th><th>Answered</th><th>Quiz score</th>{showIntegrityScore && <th title="Admin-only review indicator from tab-switch and proctor-violation counts; not a cheating verdict.">⚖ Integrity review</th>}<th>Accuracy</th><th title="Includes tab/window exits, fullscreen exits, and blocked screenshot shortcuts.">⚠ Guard violations</th><th title="Webcam / screen-share proctoring. Shows nothing when proctoring is switched off for this site.">🎥 Proctoring</th><th title="AI detection result, scored when the paper is submitted. Advisory only.">🤖 AI Detect</th><th>Progress</th></tr></thead>
               <tbody>
                 {participants.map((p, i) => (
                   <tr key={i}>
@@ -525,6 +536,13 @@ export default function LiveHostPanel({ scope = 'admin' }) {
                         ? <><strong>{Number(p.score)}</strong><span className="tiny muted"> / {totalMarks}</span></>
                         : <span className="tiny muted">—</span>}
                     </td>
+                    {showIntegrityScore && (
+                      <td title="Review indicator only — do not use as an automatic cheating verdict.">
+                        {p.integrity_review && p.integrity_review.available
+                          ? <strong className={`badge ${p.integrity_review.score >= 80 ? 'green' : p.integrity_review.score >= 50 ? 'amber' : 'red'}`}>{p.integrity_review.score}/100</strong>
+                          : <span className="badge muted" title="No active or recorded monitoring evidence for this attempt">Insufficient data</span>}
+                      </td>
+                    )}
                     <td>
                       {p.status === 'evaluated'
                         ? `${Number(p.accuracy).toFixed(1)}%`

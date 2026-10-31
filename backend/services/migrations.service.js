@@ -18,6 +18,7 @@ const UPGRADES = [
   ['subscriptions', () => require('./subscription.service').ensureSchema()],
   ['ai-detect', () => require('./aiDetection.service').ensureSchema()],
   ['proctor', () => require('./proctoring.service').ensureSchema()],
+  ['proctor-recordings', () => require('./proctorRecording.service').ensureSchema()],
   ['flags', () => require('./featureFlags.service').ensureFeatureFlags()],
   ['permissions', () => require('./permissions.service').ensurePermissions()],
   ['notifications', () => require('./notification.service').ensureSchema()],
@@ -31,6 +32,10 @@ const UPGRADES = [
   ['paytm', () => require('./paytm.service').ensureSchema()],
   ['razorpay', () => require('./razorpay.service').ensureSchema()],
   ['lesson-opens', () => require('./lessonOpens.service').ensureSchema()],
+  ['certificate-integrity', () => require('./certificateIntegrity.service').ensureSchema()],
+  ['lesson-media', () => require('./lessonMedia.service').ensureSchema()],
+  ['lesson-watch', () => require('./lessonWatch.service').ensureSchema()],
+  ['module-quizzes', () => require('./moduleQuiz.service').ensureSchema()],
 ];
 
 /**
@@ -39,6 +44,11 @@ const UPGRADES = [
  * list in step with the ensureColumn/CREATE TABLE calls in those services.
  */
 const CRITICAL_COLUMNS = [
+  ['quizzes', 'course_id'],
+  ['quizzes', 'module_id'],
+  ['lessons', 'video_path'],
+  ['courses', 'completion_policy'],
+  ['lessons', 'pdf_path'],
   ['users', 'password_changed_at'],
   ['user_sessions', 'previous_refresh_token'],
   ['user_sessions', 'refresh_rotated_at'],
@@ -85,6 +95,11 @@ const CRITICAL_COLUMNS = [
   ['subscription_orders', 'upi_review_note'],
 ];
 
+const CRITICAL_ENUM_VALUES = [
+  ['certificates', 'cert_type', 'path'],
+  ['certificate_templates', 'cert_type', 'path'],
+];
+
 const CRITICAL_TABLES = [
   'app_meta',
   'certificate_templates',
@@ -93,10 +108,25 @@ const CRITICAL_TABLES = [
   'plans',
   'point_adjustments',
   'proctor_events',
+  'proctor_recording_sessions',
+  'proctor_recording_files',
   'site_pages',
   'subscription_orders',
   'subscriptions',
   'user_anticheat_settings',
+];
+
+// These controls are backed by rows, not environment variables. If a deploy
+// skips migrations, verifying only tables/columns is insufficient: the UI
+// can render a switch whose UPDATE then fails with "Unknown setting key".
+const CRITICAL_SETTINGS = [
+  'proctor_advanced_enabled',
+  'proctor_mic_monitoring_enabled',
+  'proctor_recording_enabled',
+  'proctor_recording_retention_days',
+  'integrity_score_enabled',
+  'integrity_score_tab_switch_penalty',
+  'integrity_score_proctor_violation_penalty',
 ];
 
 async function runMigrations({ log = console } = {}) {
@@ -141,7 +171,28 @@ async function verifyCriticalSchema(runQuery) {
   const colsPresent = new Set((colRows || []).map((r) => `${r.t}.${r.c}`));
   CRITICAL_COLUMNS.forEach(([t, c]) => { if (!colsPresent.has(`${t}.${c}`)) missing.push(`${t}.${c}`); });
 
+  const enumRows = await query(
+    `SELECT TABLE_NAME AS t, COLUMN_NAME AS c, COLUMN_TYPE AS column_type
+       FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN (${placeholders})`,
+    tablesInScope,
+  );
+  const enumTypes = new Map((enumRows || []).map((r) => [`${r.t}.${r.c}`, String(r.column_type || '')]));
+  CRITICAL_ENUM_VALUES.forEach(([t, c, value]) => {
+    if (!enumTypes.has(`${t}.${c}`) || !enumTypes.get(`${t}.${c}`).includes(`'${value}'`)) {
+      missing.push(`${t}.${c} enum('${value}')`);
+    }
+  });
+
+  const settingPlaceholders = CRITICAL_SETTINGS.map(() => '?').join(', ');
+  const settingRows = await query(
+    `SELECT setting_key AS k FROM settings WHERE setting_key IN (${settingPlaceholders})`,
+    CRITICAL_SETTINGS,
+  );
+  const settingsPresent = new Set((settingRows || []).map((r) => String(r.k)));
+  CRITICAL_SETTINGS.forEach((key) => { if (!settingsPresent.has(key)) missing.push(`settings.${key} (setting)`); });
+
   return { ok: missing.length === 0, missing };
 }
 
-module.exports = { runMigrations, verifyCriticalSchema, UPGRADES, CRITICAL_COLUMNS, CRITICAL_TABLES };
+module.exports = { runMigrations, verifyCriticalSchema, UPGRADES, CRITICAL_COLUMNS, CRITICAL_ENUM_VALUES, CRITICAL_TABLES, CRITICAL_SETTINGS };

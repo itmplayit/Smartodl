@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import LessonMediaFields from '../components/LessonMediaFields';
 import { courseApi, miscApi, userApi } from '../services/api';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
@@ -16,7 +17,8 @@ export default function CourseForm({ scope = 'admin' }) {
 
   const [form, setForm] = useState({
     title: '', summary: '', description: '', category_id: '', difficulty: 'beginner', duration_hours: 10,
-    language: 'English', price: 0, status: 'draft', tags: '', instructor_id: user && user.role === 'developer' ? user.id : '',
+    language: 'English', price: 0, status: 'draft', tags: '', completion_policy: 'click',
+    instructor_id: user && user.role === 'developer' ? user.id : '',
   });
   const [course, setCourse] = useState(null);
   const [cats, setCats] = useState([]);
@@ -26,6 +28,7 @@ export default function CourseForm({ scope = 'admin' }) {
   const [moduleModal, setModuleModal] = useState(false);
   const [lessonModal, setLessonModal] = useState(null);
   const [moduleForm, setModuleForm] = useState({ title: '', description: '', position: 1 });
+  const [mediaLesson, setMediaLesson] = useState(null);
   const [lessonForm, setLessonForm] = useState({ title: '', description: '', video_url: '', content: '', duration_minutes: 10, position: 1, is_preview: 0 });
 
   const base = scope === 'admin' ? '/admin' : '/developer';
@@ -39,6 +42,7 @@ export default function CourseForm({ scope = 'admin' }) {
         title: c.title || '', summary: c.summary || '', description: c.description || '', category_id: c.category_id || '',
         difficulty: c.difficulty || 'beginner', duration_hours: c.duration_hours || 0, language: c.language || 'English',
         price: c.price || 0, status: c.status || 'draft', tags: c.tags || '', instructor_id: c.instructor_id || '',
+        completion_policy: c.completion_policy || 'click',
       });
     } catch (e) { toast.error(e.message); }
     finally { setLoading(false); }
@@ -86,10 +90,11 @@ export default function CourseForm({ scope = 'admin' }) {
   const addLesson = async (e) => {
     e.preventDefault();
     try {
-      await courseApi.createLesson({ ...lessonForm, module_id: lessonModal.id, course_id: Number(id) });
+      const { data } = await courseApi.createLesson({ ...lessonForm, module_id: lessonModal.id, course_id: Number(id) });
       toast.success('Lesson added');
       setLessonModal(null);
       setLessonForm({ title: '', description: '', video_url: '', content: '', duration_minutes: 10, position: 1, is_preview: 0 });
+      if (data?.data?.id) setMediaLesson(data.data);
       loadCourse();
     } catch (err) { toast.error(err.message); }
   };
@@ -154,6 +159,18 @@ export default function CourseForm({ scope = 'admin' }) {
               <select className="select" value={form.difficulty} onChange={set('difficulty')}>
                 {COURSE_DIFFICULTIES.map((d) => <option key={d} value={d}>{d}</option>)}
               </select>
+            </label>
+            <label className="field">Lesson complete karne ka rule
+              <select className="select" value={form.completion_policy || 'click'} onChange={set('completion_policy')}>
+                <option value="click">Open + time (default)</option>
+                <option value="watch">Video 90% dekhna zaroori</option>
+                <option value="quiz">Linked quiz pass karna zaroori</option>
+                <option value="watch_and_quiz">Video 90% + quiz pass</option>
+              </select>
+              <span className="tiny muted">
+                Student “Mark complete” dabata hai tab server yahi rule check karta hai. Video sirf uploaded
+                video par naapa jaata hai — YouTube/Vimeo link par nahi.
+              </span>
             </label>
             <label className="field">Duration (hours)
               <input className="input" type="number" min="0" step="0.5" value={form.duration_hours} onChange={set('duration_hours')} />
@@ -232,6 +249,7 @@ export default function CourseForm({ scope = 'admin' }) {
                       <div className="tiny muted">{l.duration_minutes} min {l.video_url ? '• video' : ''}</div>
                     </div>
                     <div className="row" style={{ gap: 6 }}>
+                      <button className="btn btn-sm btn-ghost" title="Upload video / PDF" onClick={() => setMediaLesson(l)}>🎬 Media</button>
                       <button className="btn btn-sm btn-ghost" onClick={() => togglePreview(l)}>{l.is_preview ? '🔒 Lock' : '🔓 Preview'}</button>
                       <button className="btn btn-sm btn-ghost" onClick={() => removeLesson(l)}>🗑</button>
                     </div>
@@ -260,6 +278,22 @@ export default function CourseForm({ scope = 'admin' }) {
             <button className="btn btn-primary">Add module</button>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        open={!!mediaLesson}
+        title={`Video & PDF — ${mediaLesson ? mediaLesson.title : ''}`}
+        onClose={() => setMediaLesson(null)}
+        wide
+      >
+        {mediaLesson && (
+          <LessonMediaFields
+            lessonId={mediaLesson.id}
+            video={mediaLesson.video_upload || null}
+            pdf={mediaLesson.pdf_upload || null}
+            onChanged={() => loadCourse()}
+          />
+        )}
       </Modal>
 
       <Modal open={!!lessonModal} title={`Add lesson to ${lessonModal ? lessonModal.title : ''}`} onClose={() => setLessonModal(null)} wide>

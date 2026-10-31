@@ -8,6 +8,7 @@ const TYPE_META = {
   quiz:      { icon: '📝', label: 'Quiz Excellence',       check: 'This credential verifies outstanding performance in a live quiz.',     ring: '#3b82f6', grad: 'linear-gradient(135deg,#bfdbfe 0%,#3b82f6 55%,#1e3a8a 100%)' },
   contest:   { icon: '🏆', label: 'Contest Champion',     check: 'This credential verifies a top finish in a competitive contest.',      ring: '#ef4444', grad: 'linear-gradient(135deg,#fecaca 0%,#ef4444 55%,#7f1d1d 100%)' },
   milestone: { icon: '💻', label: 'Coding Milestone',     check: 'This credential verifies a significant programming milestone.',        ring: '#10b981', grad: 'linear-gradient(135deg,#a7f3d0 0%,#10b981 55%,#064e3b 100%)' },
+  path:      { icon: '🛤️', label: 'Programme Completion', check: 'This credential verifies completion of every required course in a programme.', ring: '#8b5cf6', grad: 'linear-gradient(135deg,#ddd6fe 0%,#8b5cf6 55%,#4c1d95 100%)' },
 };
 
 export default function VerifyCert() {
@@ -45,6 +46,7 @@ export default function VerifyCert() {
     certType === 'quiz' ? `Scored ${scorePct}% on the "${cert.quiz_title || cert.title}" quiz.`
     : certType === 'contest' ? `Finished in ${cert.tier ? contestPlacementLabel(cert.tier) : 'a top position'} in the "${cert.contest_title || cert.title}" contest.`
     : certType === 'milestone' ? `Achieved the ${(cert.tier || 'milestone').replace(/_/g,' ')} milestone.`
+    : certType === 'path' ? `Completed every required course in the "${cert.title}" programme.`
     : `Completed the "${cert.course_title || cert.title}" course.`;
 
   return (
@@ -92,6 +94,15 @@ export default function VerifyCert() {
             {certType === 'milestone' && (
               <div className="stat-small"><div>Tier</div><strong>{certificateTierLabel(cert.tier) || '—'}</strong></div>
             )}
+            {cert.integrity && cert.integrity.shown && (
+              <div className="stat-small">
+                <div>Integrity review</div>
+                <strong style={{ color: cert.integrity.tone === 'green' ? '#16a34a' : cert.integrity.tone === 'red' ? '#dc2626' : cert.integrity.tone === 'yellow' ? '#d97706' : '#64748b' }}>
+                  ● {cert.integrity.label}
+                  {cert.integrity.available ? ` · ${Number(cert.integrity.score).toFixed(0)}/100` : ''}
+                </strong>
+              </div>
+            )}
             <div className="stat-small"><div>Issued</div><strong>{new Date(cert.issued_at).toLocaleDateString('en-IN',{year:'numeric',month:'long',day:'numeric'})}</strong></div>
             <div className="stat-small"><div>Certificate No.</div><strong style={{ fontSize: 11 }}>{cert.certificate_no}</strong></div>
           </div>
@@ -112,6 +123,12 @@ export default function VerifyCert() {
         {cert.public_token && <><a href={certApi.printUrl(cert.public_token)} target="_blank" rel="noreferrer" className="btn btn-primary">🖨️ Print / Save as PDF</a>{' '}</>}
         <Link to="/login" className="btn btn-ghost" style={{ background: 'var(--panel-2)', color: 'var(--heading)' }}>Back to SmartODL</Link>
       </div>
+
+      {cert.integrity && cert.integrity.shown && (
+        <p style={{ textAlign: 'center', color: '#64748b', fontSize: 12, marginTop: 12 }}>
+          {cert.integrity.note}
+        </p>
+      )}
 
       <p style={{ textAlign: 'center', color: '#64748b', fontSize: 12, marginTop: 16 }}>
         Anyone with the verification link or certificate number can confirm this summary. Printing requires the certificate holder's private print link. Certificate ID: <code>{cert.certificate_no}</code>

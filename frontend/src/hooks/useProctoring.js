@@ -44,6 +44,7 @@ export default function useProctoring({
   objectsRequired,
   bodyRequired = false,
   headPoseRequired = false,
+  faceCheckRequired = false,
   micRequired = false,
   dualMonitorRequired = false,
   snapshotRequired = false,
@@ -55,6 +56,7 @@ export default function useProctoring({
   publishActive = false,
   onAutoSubmit,
   violationLimit = 0,
+  initialViolations = 0,
 }) {
   const [cameraState, setCameraState] = useState('idle');  // idle|prompting|on|denied|lost
   const [screenState, setScreenState] = useState('idle');
@@ -62,6 +64,22 @@ export default function useProctoring({
   const [bodyState, setBodyState] = useState('idle');
   const [displayCount, setDisplayCount] = useState(null);
   const [violations, setViolations] = useState(0);
+  const violationsRef = useRef(0);
+  const violationAttemptRef = useRef(attemptId);
+  // The attempt detail is the persisted source of truth on reload. Keep this
+  // count monotonic so delayed batch responses can never roll it backwards.
+  useEffect(() => {
+    if (String(violationAttemptRef.current) !== String(attemptId)) {
+      violationAttemptRef.current = attemptId;
+      violationsRef.current = 0;
+      setViolations(0);
+    }
+    const initial = Number(initialViolations);
+    if (Number.isFinite(initial) && initial >= 0 && initial > violationsRef.current) {
+      violationsRef.current = initial;
+      setViolations(initial);
+    }
+  }, [attemptId, initialViolations]);
   // Seeded from public settings so the student sees the real limit straight
   // away. It used to sit at 0 until the first flush came back, so the gate
   // read "Proctoring violations: 0" with no limit for up to 15 seconds and
@@ -76,6 +94,14 @@ export default function useProctoring({
   const camStream = useRef(null);
   const scrStream = useRef(null);
   const micStream = useRef(null);
+  // Permission prompts are asynchronous; refs make policy-off take effect
+  // even if a prompt resolves after the feature was disabled.
+  const cameraRequiredRef = useRef(cameraRequired);
+  const screenRequiredRef = useRef(screenRequired);
+  const micRequiredRef = useRef(micRequired);
+  cameraRequiredRef.current = cameraRequired;
+  screenRequiredRef.current = screenRequired;
+  micRequiredRef.current = micRequired;
   const videoRef = useRef(null);
   const screenVideoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -179,7 +205,11 @@ export default function useProctoring({
     // envelope, where `violations`, `max` and `auto_submit` are all
     // undefined: the counter sat on 0 forever and auto-submit never fired.
     const d = (res && res.data && res.data.data) || {};
-    if (typeof d.violations === 'number') setViolations(d.violations);
+    if (typeof d.violations === 'number' && Number.isFinite(d.violations)) {
+      const canonical = Math.max(violationsRef.current, d.violations);
+      violationsRef.current = canonical;
+      setViolations(canonical);
+    }
     if (typeof d.max === 'number') setMaxViolations(d.max);
     if (d.auto_submit && !autoSubmitted.current) {
       autoSubmitted.current = true;
@@ -251,6 +281,11 @@ export default function useProctoring({
       // Shared with the admin Detection test so both open the camera exactly
       // the same way (and both retry without constraints if the driver balks).
       const stream = await openCamera();
+      if (!cameraRequiredRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        setCameraState('idle');
+        return true;
+      }
       camStream.current = stream;
       const v = document.createElement('video');
       v.playsInline = true; v.muted = true; v.srcObject = stream;
@@ -290,6 +325,11 @@ export default function useProctoring({
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: { displaySurface: 'monitor' }, audio: false,
       });
+      if (!screenRequiredRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        setScreenState('idle');
+        return true;
+      }
       const track = stream.getVideoTracks()[0];
       const surface = (track && track.getSettings && track.getSettings().displaySurface) || '';
       // Sharing only the quiz tab defeats the point — the student could keep
@@ -343,8 +383,14 @@ export default function useProctoring({
   /* --------------------------------------------------------- microphone -- */
   const micErrorText = (err) => {
     const name = String((err && err.name) || 'Error');
+    // A LAN IP opened over plain HTTP is not a secure context. Browser site
+    // settings cannot override that restriction; localhost is exempt, while
+    // another device needs HTTPS with a certificate it trusts.
+    if (typeof window !== 'undefined' && window.isSecureContext === false) {
+      return 'Microphone access requires a secure page. On another laptop, plain http://<LAN-IP> is blocked even if browser permission is Allow; use trusted HTTPS, or test from localhost on this computer.';
+    }
     if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
-      return 'Microphone permission is blocked. Allow microphone access from the browser address bar and try again.';
+      return 'Microphone permission is blocked by the browser or operating system. Allow this site in the address-bar/site settings, check Windows microphone privacy settings, then retry.';
     }
     if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'No microphone was found on this computer.';
     if (name === 'NotReadableError' || name === 'TrackStartError') {
@@ -369,6 +415,11 @@ export default function useProctoring({
         audio: { echoCancellation: true, noiseSuppression: true },
         video: false,
       });
+      if (!micRequiredRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        setMicState('idle');
+        return true;
+      }
       micStream.current = stream;
       stream.getAudioTracks().forEach((t) => {
         t.addEventListener('ended', () => {
@@ -419,25 +470,51 @@ export default function useProctoring({
   }, [startScreen, screenLive]);
 
   const start = useCallback(async () => {
-    const a = await startCamera();
-    const b = await startScreen();
-    const c = await startMic();
-    return a && b && c;
+    // getDisplayMedia requires a transient user activation. Invoke it directly
+    // from the click handler before any camera permission await; once the
+    // student has selected the screen, camera/mic permission can follow.
+    const screen = await startScreen();
+    const [camera, mic] = await Promise.all([startCamera(), startMic()]);
+    return screen && camera && mic;
   }, [startCamera, startScreen, startMic]);
 
-  const stop = useCallback(() => {
-    [camStream, scrStream, micStream].forEach((ref) => {
-      if (ref.current) { ref.current.getTracks().forEach((t) => t.stop()); ref.current = null; }
-    });
+  const releaseCamera = useCallback(() => {
+    if (camStream.current) { camStream.current.getTracks().forEach((t) => t.stop()); camStream.current = null; }
     if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current = null; }
+    setCameraState('idle');
+  }, []);
+
+  const releaseScreen = useCallback(() => {
+    if (scrStream.current) { scrStream.current.getTracks().forEach((t) => t.stop()); scrStream.current = null; }
     if (screenVideoRef.current) { screenVideoRef.current.srcObject = null; screenVideoRef.current = null; }
+    setScreenState('idle');
+  }, []);
+
+  const releaseMic = useCallback(() => {
+    if (micStream.current) { micStream.current.getTracks().forEach((t) => t.stop()); micStream.current = null; }
     if (micAudioRef.current) {
       micAudioRef.current.close().catch(() => {});
       micAudioRef.current = null;
     }
     micAnalyserRef.current = null;
     micDataRef.current = null;
+    micDown.current = false;
+    voiceStreak.current = 0;
+    setMicState('idle');
   }, []);
+
+  const stop = useCallback(() => {
+    releaseCamera();
+    releaseScreen();
+    releaseMic();
+  }, [releaseCamera, releaseScreen, releaseMic]);
+
+  // A feature can be switched off while the attempt remains active for other
+  // checks. Release only its sensor; do not keep a mic/display stream alive
+  // merely because the webcam or another transport is still in use.
+  useEffect(() => { if (!cameraRequired) releaseCamera(); }, [cameraRequired, releaseCamera]);
+  useEffect(() => { if (!screenRequired) releaseScreen(); }, [screenRequired, releaseScreen]);
+  useEffect(() => { if (!micRequired) releaseMic(); }, [micRequired, releaseMic]);
 
   const getStreams = useCallback(() => ({
     camera: camStream.current,
@@ -512,21 +589,29 @@ export default function useProctoring({
       }
       prevFrame.current = grey;
 
-      // Face counting — browser-native only, never a downloaded model.
+      // Face counting is part of the explicit basic Webcam check; head pose
+      // also needs face geometry. Other camera-only features must not silently
+      // activate face-presence monitoring.
+      if (!faceCheckRequired && !headPoseRequired) return;
       if (detector.current === undefined) {
         if (typeof window !== 'undefined' && 'FaceDetector' in window) {
           try { detector.current = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 5 }); }
           catch (_) { detector.current = null; }
         } else detector.current = null;
-        if (detector.current === null) push('face_check_unsupported', 'no FaceDetector in this browser');
+        if (detector.current === null && faceCheckRequired) push('face_check_unsupported', 'no FaceDetector in this browser');
+        if (detector.current === null && headPoseRequired) push('head_pose_check_unavailable', 'no FaceDetector geometry in this browser');
       }
       if (detector.current) {
         try {
           const faces = await detector.current.detect(v);
           if (cancelled) return;
-          if (!faces.length) { headAwayStreak.current = 0; push('no_face'); }
-          else if (faces.length > 1) { headAwayStreak.current = 0; push('multiple_faces', `${faces.length} faces`); }
-          else if (headPoseRequired) {
+          if (!faces.length) {
+            headAwayStreak.current = 0;
+            if (faceCheckRequired) push('no_face');
+          } else if (faces.length > 1) {
+            headAwayStreak.current = 0;
+            if (faceCheckRequired) push('multiple_faces', `${faces.length} faces`);
+          } else if (headPoseRequired) {
             const face = faces[0] || {};
             const box = face.boundingBox || {};
             const points = (Array.isArray(face.landmarks) ? face.landmarks : [])
@@ -558,7 +643,7 @@ export default function useProctoring({
     const id = setInterval(sample, SAMPLE_MS);
     sample();
     return () => { cancelled = true; clearInterval(id); };
-  }, [active, cameraRequired, objectsRequired, headPoseRequired, push, startCamera]);
+  }, [active, cameraRequired, objectsRequired, headPoseRequired, faceCheckRequired, push, startCamera]);
 
   /* ------------------------------------------------- object detection ----
      Deliberately its own loop, not folded into the camera sample: it runs 2.5x

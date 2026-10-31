@@ -254,7 +254,7 @@ const getPublicSettings = asyncHandler(async (req, res) => {
     'proctor_head_pose_enabled', 'proctor_live_snapshot_enabled',
     'proctor_live_webrtc_enabled', 'proctor_second_camera_enabled',
     'proctor_room_scan_enabled', 'proctor_identity_check_enabled',
-    'proctor_mic_monitoring_enabled', 'proctor_dual_monitor_enabled',
+    'proctor_mic_monitoring_enabled', 'proctor_dual_monitor_enabled', 'proctor_recording_enabled',
     // NOTE: proctor_webrtc_ice_servers is deliberately NOT public. It may
     // carry TURN credentials; browsers fetch the (possibly short-lived)
     // list from the authenticated attempt ICE endpoint instead.

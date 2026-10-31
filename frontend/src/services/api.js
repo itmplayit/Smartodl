@@ -318,6 +318,9 @@ export const courseApi = {
   get: (id) => api.get(`/courses/${id}`),
   create: (payload) => api.post('/courses', payload),
   update: (id, payload) => api.put(`/courses/${id}`, payload),
+  recommended: () => api.get('/courses/recommended'),
+  analytics: (id) => api.get(`/courses/${id}/analytics`),
+  analyticsXlsx: (id) => api.get(`/courses/${id}/analytics.xlsx`, { responseType: 'blob' }),
   remove: (id) => api.delete(`/courses/${id}`),
   uploadThumbnail: (id, file) => {
     const fd = new FormData(); fd.append('thumbnail', file);
@@ -337,7 +340,36 @@ export const courseApi = {
   updateLesson: (id, payload) => api.put(`/lessons/${id}`, payload),
   removeLesson: (id) => api.delete(`/lessons/${id}`),
   lesson: (id) => api.get(`/lessons/${id}`),
+  /* Lesson media (video + PDF). Uploads use XHR-style progress via onUploadProgress;
+     playback URLs come from mediaInfo() with a short-lived ticket. */
+  lessonMedia: (id) => api.get(`/lessons/${id}/media`),
+  uploadVideo: (id, file, onProgress) => {
+    const fd = new FormData();
+    fd.append('video', file);
+    return api.post(`/lessons/${id}/video`, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 0, // a 200 MB upload on a slow link must not hit the default timeout
+      onUploadProgress: onProgress,
+    });
+  },
+  uploadPdf: (id, file, onProgress) => {
+    const fd = new FormData();
+    fd.append('pdf', file);
+    return api.post(`/lessons/${id}/pdf`, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 0,
+      onUploadProgress: onProgress,
+    });
+  },
+  watchStatus: (id) => api.get(`/lessons/${id}/watch`),
+  reportWatch: (id, payload) => api.post(`/lessons/${id}/watch`, payload),
+  removeVideo: (id) => api.delete(`/lessons/${id}/video`),
+  removePdf: (id) => api.delete(`/lessons/${id}/pdf`),
 };
+
+/* The lesson viewer reads media through these relative URLs so the browser's
+   own <video>/<iframe> can stream them; they are same-origin (proxied /api). */
+export const lessonApi = courseApi;
 
 export const certApi = {
   mine: () => api.get('/certificates/mine'),
@@ -415,6 +447,14 @@ export const quizApi = {
   proctorSignal: (attemptId, payload) => api.post(`/quiz-attempts/${attemptId}/proctor-signal`, payload),
   proctorIce: (attemptId) => api.get(`/quiz-attempts/${attemptId}/proctor-ice`),
   proctorAction: (attemptId, payload) => api.post(`/quiz-attempts/${attemptId}/proctor-action`, payload),
+  proctorRecordingStatus: (attemptId) => api.get(`/quiz-attempts/${attemptId}/proctor-recording/status`),
+  proctorRecordingConsent: (sessionId, accepted, mimeTypes) => api.post(`/proctor-recordings/${sessionId}/consent`, { accepted, mime_types: mimeTypes }),
+  proctorRecordingChunk: (sessionId, feed, index, blob, mimeType) => api.post(`/proctor-recordings/${sessionId}/${feed}/chunks/${index}`, blob, { headers: { 'Content-Type': blob.type || mimeType }, timeout: 30000 }),
+  proctorRecordingFinalize: (sessionId, payload) => api.post(`/proctor-recordings/${sessionId}/finalize`, payload),
+  adminProctorRecordings: () => api.get('/admin/proctor-recordings'),
+  adminIntegrityScores: (params) => api.get('/admin/integrity-scores', { params }),
+  adminProctorRecordingFile: (id) => api.get(`/admin/proctor-recordings/files/${id}`, { responseType: 'blob' }),
+  deleteAdminProctorRecording: (sessionId) => api.delete(`/admin/proctor-recordings/${sessionId}`),
   secondCameraSession: (attemptId, rotate = false) => api.post(`/quiz-attempts/${attemptId}/second-camera/session`, { rotate: !!rotate }),
   secondCameraStatus: (attemptId) => api.get(`/quiz-attempts/${attemptId}/second-camera/status`),
   secondCameraInfo: (token) => api.get(`/proctor/second-camera/${token}`),

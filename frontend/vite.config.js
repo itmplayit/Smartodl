@@ -10,6 +10,12 @@ import react from '@vitejs/plugin-react';
 // are opt-in ONLY, via SMARTODL_PREVIEW_DEV=1 — never run `vite dev` as a
 // production server, and never enable that flag on an exposed host.
 const previewDev = process.env.SMARTODL_PREVIEW_DEV === '1';
+const localDevOrigins = [
+  /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/,
+  // Allow Vite's same-origin module requests when the dev UI is opened from
+  // another device on a private LAN. VITE_HOST must still be opted into.
+  /^https?:\/\/(10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})(:\d+)?$/,
+];
 
 export default defineConfig({
   plugins: [react()],
@@ -30,8 +36,8 @@ export default defineConfig({
       }
       : {
         // Same-origin app + direct localhost/LAN-IP development keep working;
-        // cross-origin module loading is limited to loopback origins.
-        cors: { origin: [/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/], credentials: false },
+        // Cross-origin module loading is limited to loopback + private LAN origins.
+        cors: { origin: localDevOrigins, credentials: false },
       }),
     proxy: {
       '/api': { target: 'http://127.0.0.1:5000', changeOrigin: true },

@@ -43,12 +43,16 @@ function resolveClientOrigin(res) {
 }
 const crypto = require('crypto');
 const certTemplates = require('../services/certificateTemplates.service');
+const certificateIntegrity = require('../services/certificateIntegrity.service');
 
 const TYPES = {
   course:    { prefix: 'CRS', theme: 'gold',  label: 'Course Completion' },
   quiz:      { prefix: 'QZR', theme: 'blue',  label: 'Quiz Excellence' },
   contest:   { prefix: 'WIN', theme: 'red',   label: 'Contest Champion' },
   milestone: { prefix: 'MIL', theme: 'green', label: 'Coding Milestone' },
+  // Legacy: path certificates may exist from before tracks were folded into courses.
+  // They stay verifiable; no new ones are issued.
+  path:      { prefix: 'PTH', theme: 'purple', label: 'Programme Completion' },
 };
 
 function genCertNo(prefix) {
@@ -231,7 +235,25 @@ const myCertificates = asyncHandler(async (req, res) => {
     WHERE c.user_id = ? AND c.revoked_at IS NULL
     ORDER BY c.issued_at DESC`, [req.user.id],
   );
-  ok(res, rows.map((r) => ({ ...r, theme: (TYPES[r.cert_type] || TYPES.course).theme, type_label: (TYPES[r.cert_type] || TYPES.course).label })));
+  // Integrity band is attached to course certificates only, one lookup per
+  // learner, and only for the holder's own list — never leaked to others.
+  const withBand = await Promise.all(rows.map(async (r) => {
+    let integrity = null;
+    if (r.cert_type === 'course' && r.course_id) {
+      try {
+        integrity = await certificateIntegrity.forCertificate({ userId: req.user.id, courseId: r.course_id });
+      } catch (error) {
+        console.error('[certificate] integrity band lookup failed:', error.message);
+      }
+    }
+    return {
+      ...r,
+      integrity,
+      theme: (TYPES[r.cert_type] || TYPES.course).theme,
+      type_label: (TYPES[r.cert_type] || TYPES.course).label,
+    };
+  }));
+  ok(res, withBand);
 });
 
 const verify = asyncHandler(async (req, res) => {
@@ -273,8 +295,26 @@ const verify = asyncHandler(async (req, res) => {
     student_name: c.student_name, student_college: c.student_college,
     instructor_name: c.instructor_name, issuer_name: c.instructor_name,
     duration_hours: c.duration_hours,
+    integrity: await integrityForView(c, { publicView: !matchedByToken }),
   });
 });
+
+/**
+ * The band is shown to the certificate holder (they hold the print token) and
+ * to admins. A plain certificate-number lookup is a public view, so it shows
+ * the band only when an administrator has explicitly enabled that.
+ */
+async function integrityForView(c, { publicView = false } = {}) {
+  if (c.cert_type !== 'course' || !c.course_id) return null;
+  try {
+    return await certificateIntegrity.forCertificate({
+      userId: c.user_id, courseId: c.course_id, publicView,
+    });
+  } catch (error) {
+    console.error('[certificate] integrity band lookup failed:', error.message);
+    return null;
+  }
+}
 
 /* ---------- Themed print templates ---------- */
 /* Certificate designs now live in the `certificate_templates` table.
@@ -316,6 +356,8 @@ const printView = asyncHandler(async (req, res) => {
   );
   if (!c) return res.status(404).send('Certificate not found');
   if (c.revoked_at) return res.status(410).send('This certificate has been revoked');
+  // Print links are token-only, so this is the holder's own copy.
+  c.integrity = await integrityForView(c, { publicView: false });
   res.send(await renderCertificateHtml(c, res));
 });
 
@@ -343,6 +385,22 @@ async function renderCertificateHtml(c, res, themeOverride = null, { preview = f
   const certOrigin = resolveClientOrigin(res);
   const certificateUrl = `${certOrigin}/cert/${encodeURIComponent(rawPublicToken)}`;
   const issuedDate = new Date(c.issued_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' });
+
+  // Integrity review band (green / yellow / red). Shown as a review indicator
+  // next to the grade — it never changes the award, the grade or the score.
+  const integrity = c.integrity && c.integrity.shown ? c.integrity : null;
+  const INTEGRITY_TONE = { green: '#22c55e', yellow: '#f59e0b', red: '#ef4444', muted: '#94a3b8' };
+  const integrityTone = integrity ? (INTEGRITY_TONE[integrity.tone] || INTEGRITY_TONE.muted) : INTEGRITY_TONE.muted;
+  const integrityBlock = !integrity ? '' : `
+    <div class="integrity" style="border-color:${integrityTone}55;background:${integrityTone}18">
+      <span class="integrity-dot" style="background:${integrityTone}"></span>
+      <span class="integrity-label">Integrity review</span>
+      <b style="color:${integrityTone}">${escapeHtml(String(integrity.label))}</b>
+      <span class="integrity-meta">${integrity.available
+        ? `${Number(integrity.score).toFixed(0)}/100 · ${Number(integrity.assessed_attempts)} monitored attempt(s)`
+        : 'no monitored assessment in scope'}</span>
+    </div>
+    <div class="integrity-note">Review indicator from recorded tab-switch and proctor-violation counts. Not a finding of misconduct; it does not change this certificate.</div>`;
 
   // Compose the detail line per type. The template's subtitle wins when it is
   // set, so an admin can reword the line without touching code.
@@ -380,6 +438,13 @@ async function renderCertificateHtml(c, res, themeOverride = null, { preview = f
         <div><b>${c.grade}</b><span>Grade</span></div>
         <div><b>${tierLabel(c.tier)}</b><span>Milestone</span></div>
         <div><b>Coding</b><span>Track</span></div>
+        <div><b>${issuedDate}</b><span>Issued On</span></div>`;
+      break;
+    case 'path':
+      subjectLine = 'for completing every required course in the programme:';
+      metaRow = `
+        <div><b>All required</b><span>Courses</span></div>
+        <div><b>100%</b><span>Path completion</span></div>
         <div><b>${issuedDate}</b><span>Issued On</span></div>`;
       break;
     default:
@@ -439,6 +504,12 @@ h1{font-size:clamp(2.4rem,5vw,3.7rem);font-weight:800;letter-spacing:-.02em;line
 .sig-line{width:190px;height:2px;background:linear-gradient(90deg,transparent,#cbd5e1,transparent);margin-bottom:6px}
 .sig-name{font-weight:700;color:#fff}
 .sig-title{font-size:.72rem;color:#94a3b8;letter-spacing:.14em;text-transform:uppercase;margin-top:2px}
+.integrity{display:inline-flex;align-items:center;gap:8px;margin-top:16px;padding:7px 16px;border-radius:999px;border:1px solid;font-size:.85rem;color:#e2e8f0}
+.integrity-dot{width:10px;height:10px;border-radius:50%;display:inline-block;box-shadow:0 0 10px currentColor}
+.integrity-label{letter-spacing:.18em;text-transform:uppercase;font-size:.68rem;color:#94a3b8;font-weight:700}
+.integrity-meta{color:#94a3b8;font-size:.75rem}
+.integrity-note{max-width:640px;margin-top:8px;color:#94a3b8;font-size:.68rem;line-height:1.4}
+@media print{.integrity-note{color:#64748b}}
 .type-tag{position:absolute;top:100px;left:70px;padding:5px 12px;border-radius:99px;font-size:.7rem;font-weight:700;letter-spacing:.2em;text-transform:uppercase;
   color:${theme.accent};background:${theme.accentSoft};border:1px solid ${theme.accentBorder}}
 @media print{
@@ -476,13 +547,14 @@ ${preview ? '' : `<div class="print-controls">
     <div class="presented">${subjectLine}</div>
     <div class="course-name">${c.display_title}</div>
     <div class="meta-row">${metaRow}</div>
+    ${integrityBlock}
   </div>
 
   <div class="seal-row">
     <div class="sig">
       <div class="sig-line"></div>
       <div class="sig-name">${c.instructor_name || 'The SmartODL Team'}</div>
-      <div class="sig-title">${c.cert_type === 'milestone' ? 'Platform' : c.cert_type === 'contest' ? 'Contest Judge' : 'Instructor'}</div>
+      <div class="sig-title">${c.cert_type === 'milestone' || c.cert_type === 'path' ? 'Platform' : c.cert_type === 'contest' ? 'Contest Judge' : 'Instructor'}</div>
     </div>
     <div class="seal">
       <div class="seal-mark">${theme.sealText}</div>

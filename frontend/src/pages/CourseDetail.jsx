@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { courseApi, certApi, upiApi, billingApi } from '../services/api';
+import CourseInsights from '../components/CourseInsights';
+import CourseQuizzes from '../components/CourseQuizzes';
+import VideoPlayer from '../components/VideoPlayer';
+import PdfViewer from '../components/PdfViewer';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { Badge, DiffBadge, Empty, ErrorBox, Loader, Modal } from '../components/ui';
@@ -9,6 +13,13 @@ import { postToPaytm, openRazorpay } from './Pricing';
 import Reviews from '../components/Reviews';
 import Discussions from '../components/Discussions';
 import { safeExternalHref } from '../utils/safeUrl';
+
+const ATTEMPT_LABEL = {
+  in_progress: 'in progress',
+  submitted: 'submitted',
+  evaluated: 'evaluated',
+  abandoned: 'abandoned (time over)',
+};
 
 export default function CourseDetail() {
   const { id } = useParams();
@@ -20,6 +31,9 @@ export default function CourseDetail() {
   const [openLesson, setOpenLesson] = useState(null);
   const [lessonContent, setLessonContent] = useState(null);
   const [lessonLoading, setLessonLoading] = useState(false);
+  const [lessonMedia, setLessonMedia] = useState(null);
+  const [watchState, setWatchState] = useState(null);
+  const [collapsedModules, setCollapsedModules] = useState({});
   const lessonRequest = useRef(0);
   const [busy, setBusy] = useState(false);
   const [cert, setCert] = useState(null);
@@ -139,10 +153,27 @@ export default function CourseDetail() {
     const requestId = ++lessonRequest.current;
     setOpenLesson(lesson.id);
     setLessonContent(null);
+    setLessonMedia(null);
+    setWatchState(null);
     setLessonLoading(true);
     try {
       const { data } = await courseApi.lesson(lesson.id);
       if (lessonRequest.current === requestId) setLessonContent(data.data);
+      // Tickets for <video>/<iframe> are minted only after the lesson open was
+      // authorised; a failure here must not hide the text content.
+      if (data.data?.video_upload || data.data?.pdf_upload) {
+        try {
+          const media = await courseApi.lessonMedia(lesson.id);
+          if (lessonRequest.current === requestId) setLessonMedia(media.data.data);
+        } catch { /* text content still shows */ }
+      }
+      // Watch coverage drives whether "Mark complete" is allowed.
+      if (course?.completion_policy && course.completion_policy !== 'click' && user?.role === 'student') {
+        try {
+          const status = await courseApi.watchStatus(lesson.id);
+          if (lessonRequest.current === requestId) setWatchState(status.data.data);
+        } catch { /* gate stays server-side */ }
+      }
     } catch (e) {
       if (lessonRequest.current === requestId) {
         toast.error(e.message);
@@ -158,82 +189,301 @@ export default function CourseDetail() {
 
   const progress = course.enrollment ? Number(course.enrollment.progress_percent) : 0;
 
+  const manageCourse = !!(user && (user.role === 'owner' || user.role === 'admin'
+    || (user.role === 'developer' && Number(course.instructor_id) === Number(user.id))));
+  const enrolled = !!course.enrollment;
+  const totalLessons = course.modules.reduce((sum, m) => sum + m.lessons.length, 0);
+  const totalMinutes = course.modules.reduce(
+    (sum, m) => sum + m.lessons.reduce((inner, l) => inner + (Number(l.duration_minutes) || 0), 0), 0,
+  );
+  // Count quizzes, not modules: a module may legally carry more than one.
+  const moduleQuizCount = course.modules.reduce(
+    (n, m) => n + (Array.isArray(m.quizzes) ? m.quizzes.length : (m.quiz ? 1 : 0)), 0,
+  );
+  const coverage = watchState?.coverage_percent ?? 0;
+  const coverageTarget = watchState?.target_percent ?? 90;
+
   return (
-    <div className="container section">
-      <div className="split">
-        <div>
-          <div className="row wrap mb-s" style={{ gap: 8 }}>
+    <div className="container section course-page">
+
+      {/* ------------------------------- hero ------------------------------- */}
+      <header className="course-hero">
+        <div className="course-hero-body">
+          <div className="chips">
             <DiffBadge value={course.difficulty} />
             {course.category_name && <span className="tag">{course.category_name}</span>}
-            {course.language && <span className="tag">{course.language}</span>}
+            {course.language && <span className="tag">🌐 {course.language}</span>}
+            {Number(course.price) === 0 && !course.premium_lock && <span className="tag tag-green">Free</span>}
             {course.status !== 'published' && <Badge tone="amber">{course.status}</Badge>}
           </div>
-          <h1 style={{ fontSize: '2rem' }}>{course.title}</h1>
-          <p className="muted">{course.summary}</p>
-          <div className="row wrap mt-s" style={{ gap: 14 }}>
-            <span className="small">👨‍🏫 {course.instructor_name || 'SmartODL'}</span>
-            <span className="small">⭐ {Number(course.rating).toFixed(1)}</span>
-            <span className="small">🎓 {course.total_students} students</span>
-            <span className="small">⏱ {course.duration_hours} hours</span>
-            <span className="small">📚 {course.lessons_count} lessons</span>
+          <h1 className="course-hero-title">{course.title}</h1>
+          <p className="course-hero-summary">{course.summary || 'Course description is being written.'}</p>
+          <div className="chips chips-muted">
+            <span>👨‍🏫 {course.instructor_name || 'SmartODL'}</span>
+            <span>⭐ {Number(course.rating || 0).toFixed(1)}</span>
+            <span>🎓 {course.total_students} learners</span>
+            <span>⏱ {course.duration_hours} hours</span>
+            <span>📚 {course.lessons_count} lessons</span>
+            {moduleQuizCount > 0 && <span>🧠 {moduleQuizCount} module quizzes</span>}
           </div>
-          <div className="divider" />
-          <h3>About this course</h3>
-          <p style={{ whiteSpace: 'pre-wrap' }} className="muted">{course.description}</p>
+        </div>
+        <div className="course-hero-art">
+          {course.thumbnail
+            ? <img src={course.thumbnail} alt="" />
+            : <span aria-hidden="true">📘</span>}
+        </div>
+      </header>
 
-          <h3 className="mt">Course content</h3>
-          <div className="stack" style={{ gap: 10 }}>
-            {course.modules.map((m) => (
-              <div className="panel" key={m.id}>
-                <div className="between">
-                  <strong>{m.position}. {m.title}</strong>
-                  <span className="tiny muted">{m.lessons.length} lessons</span>
-                </div>
-                {m.description && <p className="tiny muted">{m.description}</p>}
-                <div className="list-tight mt-s">
-                  {m.lessons.map((l) => (
-                    <div key={l.id} className="between">
-                      <button className="btn btn-sm btn-ghost" style={{ textAlign: 'left' }} onClick={() => openLessonContent(l)}>
-                        {l.locked ? '🔒' : l.is_preview ? '▶' : '📗'} {l.title}
-                        {l.is_preview && <span className="tag">preview</span>}
-                      </button>
-                      <div className="row" style={{ gap: 8 }}>
-                        <span className="tiny muted">{l.duration_minutes} min</span>
-                        {course.enrollment && (
-                          <button className="btn btn-sm btn-ghost" onClick={() => completeLesson(l.id)}>Mark complete</button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+      {/* --------------------------- progress strip --------------------------- */}
+      {enrolled && (
+        <section className="course-progress">
+          <div className="between wrap" style={{ gap: 10 }}>
+            <div>
+              <span className="eyebrow">Your progress</span>
+              <strong style={{ display: 'block', fontSize: '1.1rem' }}>
+                {progress}% complete
+                <span className="muted" style={{ fontWeight: 400, fontSize: '.85rem' }}>
+                  {' '}· {course.enrollment.completed_lessons || 0} / {totalLessons} lessons
+                </span>
+              </strong>
+            </div>
+            {course.enrollment.status === 'completed' ? (
+              <Badge tone="green">🎓 Completed</Badge>
+            ) : (
+              <span className="small muted">Next: {course.modules.flatMap((m) => m.lessons).find((l) => !l.locked && !openLesson)?.title || 'open any lesson'}</span>
+            )}
           </div>
+          <div className="progress mt-s"><i style={{ width: `${progress}%` }} /></div>
+        </section>
+      )}
 
-          {openLesson && (lessonLoading || lessonContent) && (
-            <div className="card mt">
-              <div className="between">
-                <h3>{lessonContent?.title || 'Loading lesson…'}</h3>
-                <button className="icon-btn" onClick={() => { lessonRequest.current += 1; setOpenLesson(null); setLessonContent(null); setLessonLoading(false); }}>✕</button>
+      <div className="course-layout">
+        {/* ------------------------------ content ------------------------------ */}
+        <div className="course-main">
+          <section className="card">
+            <div className="between wrap mb-s">
+              <div>
+                <h2 style={{ marginBottom: 2 }}>Course content</h2>
+                <p className="tiny muted" style={{ margin: 0 }}>
+                  {course.modules.length} modules · {totalLessons} lessons · about {Math.round(totalMinutes / 60)}h {totalMinutes % 60}m
+                  {moduleQuizCount > 0 && ` · ${moduleQuizCount} module quiz${moduleQuizCount === 1 ? '' : 'zes'}`}
+                </p>
               </div>
-              {lessonLoading ? <Loader label="Opening lesson…" /> : (
-                <>
-                  {safeExternalHref(lessonContent.video_url) && (
-                    <div className="soft mb-s tiny">🎬 Video: <a className="link" href={safeExternalHref(lessonContent.video_url)} target="_blank" rel="noreferrer">{lessonContent.video_url}</a></div>
-                  )}
-                  {safeExternalHref(lessonContent.resource_url) && (
-                    <div className="soft mb-s tiny">📎 Resource: <a className="link" href={safeExternalHref(lessonContent.resource_url)} target="_blank" rel="noreferrer">{lessonContent.resource_url}</a></div>
-                  )}
-                  <div style={{ whiteSpace: 'pre-wrap' }} className="muted">{lessonContent.content || 'Lesson content will appear here.'}</div>
-                </>
+              {enrolled && (
+                <span className="tag">{course.enrollment.completed_lessons || 0} / {totalLessons} done</span>
               )}
             </div>
+
+            {course.modules.length === 0 && (
+              <Empty title="No modules yet" hint="The instructor is still building this course." />
+            )}
+
+            <div className="stack" style={{ gap: 12 }}>
+              {course.modules.map((m) => {
+                const moduleMinutes = m.lessons.reduce((sum, l) => sum + (Number(l.duration_minutes) || 0), 0);
+                const isOpen = !collapsedModules[m.id];
+                return (
+                  <article className={'module-card' + (isOpen ? ' is-open' : '')} key={m.id}>
+                    <button
+                      type="button"
+                      className="module-head"
+                      onClick={() => setCollapsedModules((prev) => ({ ...prev, [m.id]: !prev[m.id] }))}
+                      aria-expanded={isOpen}
+                    >
+                      <span className="module-index">{m.position}</span>
+                      <span className="module-head-text">
+                        <strong>{m.title}</strong>
+                        <span className="tiny muted">
+                          {m.lessons.length} lessons · {moduleMinutes} min
+                          {(() => {
+                            const n = Array.isArray(m.quizzes) ? m.quizzes.length : (m.quiz ? 1 : 0);
+                            return n ? ` · 📚 ${n} module quiz${n === 1 ? '' : 'zes'}` : '';
+                          })()}
+                        </span>
+                      </span>
+                      <span className="module-chevron">{isOpen ? '▾' : '▸'}</span>
+                    </button>
+
+                    {isOpen && (
+                      <div className="module-body">
+                        {m.description && <p className="tiny muted">{m.description}</p>}
+                        <div className="lesson-list">
+                          {m.lessons.map((l) => (
+                            <div className={'lesson-row' + (openLesson === l.id ? ' is-active' : '')} key={l.id}>
+                              <button type="button" className="lesson-open" onClick={() => openLessonContent(l)}>
+                                <span className="lesson-icon">
+                                  {l.locked ? '🔒' : l.is_preview ? '▶' : '📗'}
+                                </span>
+                                <span className="lesson-title">
+                                  {l.title}
+                                  {l.is_preview && <span className="tag">preview</span>}
+                                </span>
+                                <span className="tiny muted">{l.duration_minutes} min</span>
+                              </button>
+                              {course.enrollment && !l.locked && (
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-ghost"
+                                  onClick={() => completeLesson(l.id)}
+                                >
+                                  Mark complete
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* ------------------------- module quiz ------------------------- */}
+                        {/* A module can carry more than one quiz — list them all so a
+                            second quiz never becomes invisible on the course page. */}
+                        {(m.quizzes || (m.quiz ? [m.quiz] : [])).map((quiz) => (
+                          <div className={'module-quiz' + (quiz.passed ? ' is-passed' : '')} key={quiz.id}>
+                            <div className="module-quiz-main">
+                              <strong>📚 Module quiz</strong>
+                              {quiz.visible === false && (
+                                <span className="tag" title="Students can't see or attempt a draft quiz — publish it to open it up">
+                                  draft · students can't see it
+                                </span>
+                              )}
+                              <span className="tiny muted">
+                                {quiz.title} · {quiz.question_count} questions · {quiz.total_marks} marks ·
+                                {' '}pass {quiz.passing_score}% · {quiz.time_limit_minutes} min
+                              </span>
+                              <div className="chips chips-mini">
+                                <span title="Tab switch detect hota hai">👁 Tab guard</span>
+                                <span title="Quiz fullscreen me chalta hai">🔒 Fullscreen</span>
+                                <span title="Copy-paste band">📋 Copy block</span>
+                                <span className="chips-none">🚫 No camera</span>
+                                <span className="chips-none">🚫 No screen share</span>
+                              </div>
+                              {quiz.attempt_id && (
+                                <span className="tiny muted">
+                                  Last attempt: <b>{ATTEMPT_LABEL[quiz.attempt_status] || quiz.attempt_status}</b>
+                                  {quiz.attempt_total_marks
+                                    ? ` · ${Number(quiz.attempt_score) || 0}/${quiz.attempt_total_marks}`
+                                    : ''}
+                                  {quiz.passed ? ' · ✅ passed' : ''}
+                                </span>
+                              )}
+                            </div>
+                            {quiz.visible === false ? (
+                              <Link className="btn btn-sm btn-ghost" to={`/quizzes/${quiz.id}`}>Open in admin</Link>
+                            ) : (
+                              <Link className="btn btn-sm btn-primary" to={`/quizzes/${quiz.id}`}>
+                                {quiz.passed ? 'Review quiz' : quiz.attempt_id ? 'Try again' : 'Start quiz'}
+                              </Link>
+                            )}
+                          </div>
+                        ))}
+                        {manageCourse && (m.quizzes || []).length === 0 && (
+                          <div className="module-quiz is-empty">
+                            <div className="module-quiz-main">
+                              <strong>📚 No module quiz yet</strong>
+                              <span className="tiny muted">
+                                Har module ka apna quiz ho sakta hai — anti-cheat ke saath, camera ke bina.
+                              </span>
+                            </div>
+                            <Link
+                              className="btn btn-sm btn-ghost"
+                              to={`${user && user.role === 'developer' ? '/developer' : '/admin'}/quizzes?course=${course.id}&module=${m.id}`}
+                            >
+                              ➕ Add quiz
+                            </Link>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+
+          {/* --------------------------- lesson viewer --------------------------- */}
+          {openLesson && (lessonLoading || lessonContent) && (
+            <section className="card lesson-panel">
+              <div className="lesson-panel-head">
+                <div>
+                  <span className="eyebrow">Lesson</span>
+                  <h3 style={{ margin: 0 }}>{lessonContent?.title || 'Loading lesson…'}</h3>
+                </div>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label="Close lesson"
+                  onClick={() => { lessonRequest.current += 1; setOpenLesson(null); setLessonContent(null); setLessonMedia(null); setWatchState(null); setLessonLoading(false); }}
+                >
+                  ✕
+                </button>
+              </div>
+
+              {lessonLoading ? <Loader label="Opening lesson…" /> : (
+                <>
+                  <VideoPlayer
+                    media={lessonMedia?.video}
+                    externalUrl={lessonContent.video_url}
+                    title={lessonContent.title}
+                    lessonId={lessonContent.id}
+                    resumeAt={watchState?.last_position || 0}
+                    onWatchUpdate={setWatchState}
+                  />
+
+                  {course.completion_policy && course.completion_policy !== 'click' && lessonMedia?.video && (
+                    <div className="watch-box">
+                      <div className="between tiny">
+                        <span>🎬 Video coverage <b>{coverage}%</b> / {coverageTarget}% chahiye</span>
+                        <span className="muted">
+                          {(watchState?.watched_seconds || 0) > 0
+                            ? `${Math.round((watchState?.watched_seconds || 0) / 60)} min dekha`
+                            : 'abhi shuru nahi kiya'}
+                        </span>
+                      </div>
+                      <div className="progress mt-s"><i style={{ width: `${Math.min(100, coverage)}%` }} /></div>
+                      <p className="tiny muted" style={{ margin: '6px 0 0' }}>
+                        Sirf chalane se count hota hai — pause ya tab band karke chhod dene par coverage nahi badhti.
+                        {course.completion_policy.includes('quiz') && ' Is lesson ke liye module quiz pass karna bhi zaroori hai.'}
+                      </p>
+                    </div>
+                  )}
+
+                  <PdfViewer media={lessonMedia?.pdf} title={lessonContent.title} />
+
+                  {safeExternalHref(lessonContent.resource_url) && (
+                    <p className="tiny muted">📎 Extra resource: <a className="link" href={safeExternalHref(lessonContent.resource_url)} target="_blank" rel="noreferrer">open link</a></p>
+                  )}
+
+                  {lessonContent.content && (
+                    <div className="lesson-text">{lessonContent.content}</div>
+                  )}
+
+                  {course.enrollment && (
+                    <div className="lesson-panel-actions">
+                      <button type="button" className="btn btn-primary" onClick={() => completeLesson(lessonContent.id)}>
+                        ✓ Mark this lesson complete
+                      </button>
+                      <span className="tiny muted">
+                        {course.completion_policy === 'watch' && coverage < coverageTarget
+                          ? `Video ${coverageTarget}% dekhne ke baad hi complete hoga (abhi ${coverage}%).`
+                          : course.completion_policy === 'quiz'
+                            ? 'Module quiz pass hone par hi complete hoga.'
+                            : course.completion_policy === 'watch_and_quiz'
+                              ? `Video ${coverageTarget}% + module quiz pass — dono chahiye.`
+                              : 'Lesson khula hai — complete kar sakte hain.'}
+                      </span>
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
           )}
 
+          <CourseQuizzes course={course} canManage={manageCourse} />
+          {manageCourse && <CourseInsights course={course} />}
+
           {course.notes && course.notes.length > 0 && (
-            <>
-              <h3 className="mt">Course notes</h3>
-              <div className="list-tight card">
+            <section className="card mt">
+              <h3 className="mb-s">📄 Course notes</h3>
+              <div className="list-tight">
                 {course.notes.map((n) => (
                   <div key={n.id} className="between">
                     <span className="small">📄 {n.title}</span>
@@ -241,43 +491,52 @@ export default function CourseDetail() {
                   </div>
                 ))}
               </div>
-            </>
+            </section>
           )}
         </div>
 
-        <div className="stack" style={{ position: 'sticky', top: 84 }}>
-          <div className="card">
+        {/* ------------------------------- sidebar ------------------------------- */}
+        <aside className="course-side">
+          <div className="card course-buy">
             {course.thumbnail
-              ? <img src={course.thumbnail} alt="" style={{ width: '100%', borderRadius: 10, marginBottom: 12 }} />
-              : <div style={{ height: 150, borderRadius: 10, marginBottom: 12, display: 'grid', placeItems: 'center', fontSize: '3rem', background: 'linear-gradient(135deg,#4f46e5,#0f172a)' }}>📘</div>}
+              ? <img src={course.thumbnail} alt="" className="course-buy-thumb" />
+              : <div className="course-buy-thumb course-buy-art">📘</div>}
+
             {course.enrollment ? (
               <>
-                <Badge tone="green">✓ Enrolled</Badge>
-                <div className="mt-s">
-                  <div className="between small"><span>Your progress</span><span>{progress}%</span></div>
-                  <div className="progress mt-s"><i style={{ width: `${progress}%` }} /></div>
+                <div className="between">
+                  <Badge tone="green">✓ Enrolled</Badge>
+                  <span className="tiny muted">{progress}% done</span>
                 </div>
+                <div className="progress mt-s"><i style={{ width: `${progress}%` }} /></div>
                 {course.enrollment.status === 'completed' ? (
-                  <div className="notice success mt" style={{textAlign:'left'}}>
+                  <div className="notice success mt" style={{ textAlign: 'left' }}>
                     🎓 <b>Course completed!</b>
                     {cert ? (
                       <>
-                        <p className="tiny" style={{margin:'6px 0 10px',opacity:.85}}>Certificate #{cert.certificate_no} • Grade {cert.grade}</p>
-                        <div className="row" style={{gap:8}}>
+                        <p className="tiny" style={{ margin: '6px 0 10px', opacity: .85 }}>Certificate #{cert.certificate_no} • Grade {cert.grade}</p>
+                        <div className="row" style={{ gap: 8 }}>
                           <a className="btn btn-primary btn-sm" href={certApi.printUrl(cert.public_token)} target="_blank" rel="noreferrer">🏅 View certificate</a>
                           <Link className="btn btn-ghost btn-sm" to={certApi.verifyUrl(cert.public_token)}>Verify link</Link>
                         </div>
                       </>
-                    ) : <p className="tiny" style={{margin:'6px 0 0',opacity:.85}}>Your certificate is being prepared.</p>}
+                    ) : <p className="tiny" style={{ margin: '6px 0 0', opacity: .85 }}>Your certificate is being prepared.</p>}
                   </div>
                 ) : (
-                  <Link className="btn btn-primary btn-block mt" to={user?.role === 'student' ? '/student/courses' : '/courses'}>Continue learning</Link>
+                  <Link className="btn btn-primary btn-block mt" to={user?.role === 'student' ? '/student/courses' : '/courses'}>
+                    Continue learning
+                  </Link>
                 )}
               </>
             ) : (
               <>
                 <div className="between">
-                  <div><div className="tiny muted">Course access</div><div style={{ fontWeight: 800, fontSize: '1.4rem' }}>{Number(course.price) === 0 ? 'Free' : `₹${course.price}`}</div></div>
+                  <div>
+                    <div className="tiny muted">Course access</div>
+                    <div style={{ fontWeight: 800, fontSize: '1.6rem' }}>
+                      {Number(course.price) === 0 ? 'Free' : `₹${course.price}`}
+                    </div>
+                  </div>
                   <Badge tone="cyan">Lifetime access</Badge>
                 </div>
                 {course.premium_lock && !course.purchase_required ? (
@@ -306,19 +565,26 @@ export default function CourseDetail() {
                 {!user && !(course.premium_lock && !course.purchase_required) && <p className="tiny muted mt-s center">Login required to enrol and download material.</p>}
               </>
             )}
+
             <div className="divider" />
-            <div className="stack" style={{ gap: 8 }}>
-              <span className="small">✅ {course.modules.length} modules</span>
-              <span className="small">✅ {course.lessons_count} video lessons</span>
-              <span className="small">✅ Downloadable notes</span>
-              <span className="small">✅ Quizzes & coding practice</span>
-              <span className="small">✅ Certificate of completion</span>
-            </div>
+            <ul className="course-includes">
+              <li>✅ {course.modules.length} modules · {totalLessons} lessons</li>
+              <li>✅ Video lessons + PDF notes (in-page reader)</li>
+              {moduleQuizCount > 0 && <li>✅ {moduleQuizCount} module quiz{moduleQuizCount === 1 ? '' : 'zes'} (no camera)</li>}
+              <li>✅ Downloadable notes</li>
+              <li>✅ Certificate of completion</li>
+              {course.completion_policy && course.completion_policy !== 'click' && (
+                <li>🎯 Completion rule: {
+                  course.completion_policy === 'watch' ? 'video 90%'
+                    : course.completion_policy === 'quiz' ? 'module quiz pass'
+                      : 'video 90% + quiz'
+                }</li>
+              )}
+            </ul>
           </div>
           {!user && <div className="soft small">🔐 Log in to track progress, take quizzes and download notes.</div>}
-        </div>
+        </aside>
       </div>
-      {course.modules.length === 0 && <Empty title="No modules yet" hint="The instructor is still building this course." />}
 
       {/* ------------------------- reviews & discussions ------------------------- */}
       <section className="card mt" style={{ marginTop: 36 }}>

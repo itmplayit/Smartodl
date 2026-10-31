@@ -18,6 +18,7 @@ const { clientBase, isClientUrlConfigured } = require('../utils/clientUrl');
 const service = require('../services/subscription.service');
 const paytm = require('../services/paytm.service');
 const razorpay = require('../services/razorpay.service');
+const { matchesPaiseAmount } = require('../utils/paymentAmount');
 
 /**
  * Tells the pricing and subscription screens which gateway is live.
@@ -370,10 +371,14 @@ async function settleWithPaytm(order) {
     await exec("UPDATE subscription_orders SET status='failed' WHERE id = ? AND status='created'", [order.id]);
     return { paid: false, message: `The Paytm payment was not successful: ${status.message || 'failed'} — please try again.` };
   }
-  // Paytm says paid — but make sure it paid the amount WE asked for.
+  // Fail closed: a successful status is not enough without an exact amount
+  // from Paytm. Missing, malformed, or mismatched amounts must never grant an
+  // entitlement; otherwise an incomplete gateway response could activate free.
   const expected = (Number(order.amount_paise) / 100).toFixed(2);
-  if (status.amount && Number(status.amount).toFixed(2) !== expected) {
-    return { paid: false, message: `Amount mismatch — the order was for ₹${expected}, but Paytm reported ₹${status.amount}. Please contact support.` };
+  if (!matchesPaiseAmount(status.amount, order.amount_paise)) {
+    const received = status.amount === null || status.amount === undefined || String(status.amount).trim() === ''
+      ? 'not supplied' : `₹${status.amount}`;
+    return { paid: false, message: `Amount verification failed — expected ₹${expected}, Paytm reported ${received}. Please contact support.` };
   }
   if (!status.txnId) return { paid: false, pending: true, message: 'Paytm reported success, but no transaction ID was returned — check the status again shortly.' };
   const activated = await service.activateOrder(order, { paymentId: status.txnId });

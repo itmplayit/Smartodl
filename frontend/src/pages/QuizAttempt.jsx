@@ -11,6 +11,7 @@ import { Badge, Empty, ErrorBox, Loader } from '../components/ui';
 const CodeEditor = lazy(() => import('../components/CodeEditor'));
 import useTypingTelemetry from '../hooks/useTypingTelemetry';
 import useProctoring from '../hooks/useProctoring';
+import ProctorRecordingCapture from '../quiz/ProctorRecordingCapture';
 import { LANGS } from '../utils/constants';
 import { clock } from '../utils/format';
 import { lcText } from '../utils/lctext';
@@ -256,6 +257,8 @@ export default function QuizAttempt() {
   // live-quiz tab-switch guard (anti-cheat)
   const [violations, setViolations] = useState(0);
   const [tabWarning, setTabWarning] = useState(false);
+  const [tabWarningReason, setTabWarningReason] = useState('tab/window switch');
+  const [pendingTabViolations, setPendingTabViolations] = useState(0);
   // live-quiz rule: manual Submit unlocks only after every question has been
   // OPENED at least once (auto-submits — timer / tab-guard / host-end — are
   // never blocked by this rule). Seen ids persist per attempt via localStorage.
@@ -263,7 +266,9 @@ export default function QuizAttempt() {
   const [seenCount, setSeenCount] = useState(0);
   const seenHydrated = useRef(false);
   const violationsRef = useRef(0);
-  const lastViolationAt = useRef(0);
+  const violationAttemptRef = useRef(attemptId);
+  const awayRef = useRef(false);
+  const tabAutoSubmittedRef = useRef(false);
   const timeOnQuestion = useRef(0);
   const pending = useRef(new Map());
   const expired = useRef(false);
@@ -461,9 +466,19 @@ export default function QuizAttempt() {
   const cpBlockEnabled = acOn('quiz_cp_block', true);
   const MAX_TAB_VIOLATIONS = Math.max(1, acNum('tab_guard_max_violations', 3));
   const isLive = !!(state.quiz && state.quiz.quiz_type === 'live');
-  const guardActive = tabGuardEnabled && !result && isLive;
-  const lockdownActive = lockdownEnabled && !result && isLive;
-  const cpBlockActive = cpBlockEnabled && !result && isLive;
+  /* A module quiz is the opposite of a live quiz in one respect (never a camera,
+     never a screen share) but it IS a supervised assessment: the Feature Control
+     floor turns the tab guard, fullscreen lockdown, copy-paste block and
+     screenshot block ON, and the backend marks that payload with
+     anticheat.module_quiz / anticheat.enforced. Before this flag existed those
+     four checks were written as `&& isLive`, so on a module quiz they silently
+     did nothing — the switches were on in the payload and dead in the browser. */
+  const isModuleQuiz = !!(ac && (ac.module_quiz === true || ac.module_quiz === '1' || ac.enforced === true))
+    || !!(state.quiz && state.quiz.module_id);
+  const acEnforced = isLive || isModuleQuiz;
+  const guardActive = tabGuardEnabled && !result && acEnforced;
+  const lockdownActive = lockdownEnabled && !result && acEnforced;
+  const cpBlockActive = cpBlockEnabled && !result && acEnforced;
   const [proctorConsented, setProctorConsented] = useState(false);
   // True between "Allow access" and the end of preflight: live publishing
   // runs in this window so the host can observe the room scan / identity
@@ -496,11 +511,6 @@ export default function QuizAttempt() {
   const advOn = (policyKey, settingKey) => policyOn(policyKey)
     && currentAdvancedMaster && isOn(settingKey, false);
 
-  const policyRoomScan = policyOn('room_scan');
-  const policySecondCamera = policyOn('second_camera');
-  const policyIdentity = policyOn('identity');
-  const policyMic = policyOn('mic');
-
   const proctorBody = advOn('body', 'proctor_body_detection_enabled');
   const proctorHeadPose = advOn('head_pose', 'proctor_head_pose_enabled');
   const liveSnapshot = advOn('snapshot', 'proctor_live_snapshot_enabled');
@@ -511,25 +521,25 @@ export default function QuizAttempt() {
   const proctorMic = advOn('mic', 'proctor_mic_monitoring_enabled');
   const proctorDualMonitor = advOn('dual_monitor', 'proctor_dual_monitor_enabled');
 
-  // Before consent, the sensors the frozen policy's preflight needs must be
-  // requestable even if an admin just flipped a switch off; afterwards only
-  // the still-enabled checks keep their sensors.
-  const policyCameraNeeded = policyOn('body') || policyOn('head_pose') || policyOn('snapshot')
-    || policyOn('webrtc') || policyRoomScan || policyIdentity;
-  const policyScreenNeeded = policyOn('snapshot') || policyOn('webrtc') || policyOn('dual_monitor');
+  // The attempt snapshot prevents newly-enabled checks from appearing mid-exam,
+  // while the current admin switch can withdraw a check immediately. Only
+  // currently effective checks keep their sensors or preflight steps alive.
+  // Saved recording is deliberately independent of the Advanced Proctoring
+  // master switch (the policy/backend both preserve this contract). It still
+  // requires that recording was enabled when this live attempt was snapshotted.
+  const proctorRecording = policyOn('recording') && isOn('proctor_recording_enabled', false);
   const advancedCameraNeeded = proctorBody || proctorHeadPose || liveSnapshot || liveWebrtc
-    || proctorRoomScan || proctorIdentity || (!proctorConsented && policyCameraNeeded);
-  const advancedScreenNeeded = liveSnapshot || liveWebrtc || proctorDualMonitor
-    || (!proctorConsented && policyScreenNeeded);
+    || proctorRoomScan || proctorIdentity || proctorRecording;
+  const advancedScreenNeeded = liveSnapshot || liveWebrtc || proctorRecording;
 
-  const proctorCamera = (acOn('proctor_camera_enabled', false) || advancedCameraNeeded) && !result && isLive;
+  const proctorBasicCamera = acOn('proctor_camera_enabled', false) && !result && isLive;
+  const proctorCamera = (proctorBasicCamera || advancedCameraNeeded) && !result && isLive;
   const proctorScreen = (acOn('proctor_screen_enabled', false) || advancedScreenNeeded) && !result && isLive;
-  // Object detection rides on the camera — one switch, not two. Splitting them
-  // meant an admin could turn on "Webcam" and never realise phone/book
-  // detection was a separate switch that had silently stayed off.
-  const proctorObjects = proctorCamera;
-  const proctorOn = proctorCamera || proctorScreen || proctorMic || proctorSecondCamera
-    || (!proctorConsented && (policySecondCamera || policyMic));
+  // Phone/book inference is part of the explicit basic Webcam option. An
+  // advanced feature that happens to need a camera (e.g. identity only) must
+  // not silently turn on a different object-detection check.
+  const proctorObjects = proctorBasicCamera;
+  const proctorOn = proctorCamera || proctorScreen || proctorMic || proctorSecondCamera || proctorDualMonitor;
   const [proctorBusy, setProctorBusy] = useState(false);
   const [preflightStep, setPreflightStep] = useState(null); // room | second | identity
   const [preflightBusy, setPreflightBusy] = useState(false);
@@ -554,7 +564,8 @@ export default function QuizAttempt() {
     objectsRequired: proctorObjects,
     bodyRequired: proctorBody,
     headPoseRequired: proctorHeadPose,
-    micRequired: proctorMic || (!proctorConsented && policyMic),
+    faceCheckRequired: proctorBasicCamera,
+    micRequired: proctorMic,
     dualMonitorRequired: proctorDualMonitor,
     snapshotRequired: liveSnapshot,
     active: proctorOn && proctorConsented,
@@ -562,6 +573,8 @@ export default function QuizAttempt() {
     onAutoSubmit: () => { if (submitRef.current) submitRef.current(true); },
     // The quiz creator's limit, so the real ceiling is on screen before the first flush.
     violationLimit: Math.max(0, acNum('proctor_max_violations', 0)),
+    initialViolations: String(state.attempt?.id) === String(attemptId)
+      ? Number(state.attempt?.proctor_violations || 0) : 0,
   });
   const [resumeBusy, setResumeBusy] = useState(false);
   const proctorRef = useRef(proctor);
@@ -637,12 +650,12 @@ export default function QuizAttempt() {
   const preflightCompletingRef = useRef(false);
   const secondWasConnectedRef = useRef(false);
   const secondOutageReportedRef = useRef(false);
-  // The order/steps come from the frozen policy — the rules shown on the
-  // consent screen — even if a switch is flipped while the student reads it.
+  // Preflight remains scoped to the frozen attempt, but an administrator can
+  // withdraw any step immediately; disabled checks are removed from the flow.
   const preflightOrder = [
-    policyRoomScan ? 'room' : null,
-    policySecondCamera ? 'second' : null,
-    policyIdentity ? 'identity' : null,
+    proctorRoomScan ? 'room' : null,
+    proctorSecondCamera ? 'second' : null,
+    proctorIdentity ? 'identity' : null,
   ].filter(Boolean);
 
   const finishPreflight = async () => {
@@ -735,7 +748,7 @@ export default function QuizAttempt() {
      It now surfaces an error with an explicit retry, and the student can
      rotate to a fresh QR — which also kills a leaked/expired old token
      (e.g. after a server restart wiped the in-memory session). */
-  const pairingOpen = preflightStep === 'second' || showSecondRepair;
+  const pairingOpen = proctorSecondCamera && (preflightStep === 'second' || showSecondRepair);
   useEffect(() => {
     if (!pairingOpen) return undefined;
     if (secondSession && !secondRequest.rotate) return undefined;
@@ -1040,37 +1053,81 @@ export default function QuizAttempt() {
     return undefined;
   }, [current, isLive, state.questions, attemptId]);
 
-  // Shared strike logic — used by both tab-switches and fullscreen exits.
-  const bumpViolation = () => {
-    const now = Date.now();
-    if (now - lastViolationAt.current < 1200) return; // one event per switch
-    lastViolationAt.current = now;
-    violationsRef.current += 1;
-    const next = violationsRef.current;
-    setViolations(next);
+  // Persist each guard strike first, then reconcile to the server's atomic
+  // counter. The previous client-only increment was lost on reload and ignored
+  // the canonical count returned by the endpoint.
+  const recordViolation = useCallback(async (reason = 'tab/window switch') => {
+    if (!attemptId || String(state.attempt?.id) !== String(attemptId) || result) return;
+    setTabWarningReason(reason);
     setTabWarning(true);
-    quizApi.violation(attemptId).catch(() => {}); // audit trail for the host
-    if (next >= MAX_TAB_VIOLATIONS && tabGuardAutoSubmit) {
-      toast.error(`${MAX_TAB_VIOLATIONS} violations — the quiz is being submitted automatically`);
-      submit(true);
-    } else if (next >= MAX_TAB_VIOLATIONS) {
-      toast.error(`The violation limit (${MAX_TAB_VIOLATIONS}) has been exceeded — this is being reported to the host`);
+    setPendingTabViolations((n) => n + 1);
+    try {
+      const res = await quizApi.violation(attemptId);
+      const count = Number(res?.data?.data?.violations);
+      if (Number.isFinite(count) && count >= 0) {
+        const canonical = Math.max(violationsRef.current, count);
+        violationsRef.current = canonical;
+        setViolations(canonical);
+        if (MAX_TAB_VIOLATIONS > 0 && canonical >= MAX_TAB_VIOLATIONS) {
+          if (tabGuardAutoSubmit && !tabAutoSubmittedRef.current) {
+            tabAutoSubmittedRef.current = true;
+            toast.error(`${MAX_TAB_VIOLATIONS} violations — the quiz is being submitted automatically`);
+            if (submitRef.current) submitRef.current(true);
+          } else if (!tabGuardAutoSubmit) {
+            toast.error(`The violation limit (${MAX_TAB_VIOLATIONS}) has been exceeded — this is being reported to the host`);
+          }
+        }
+      }
+    } catch (_) {
+      toast.error('Violation count could not be synced. Check your connection; the host count updates only after the server confirms it.');
+    } finally {
+      setPendingTabViolations((n) => Math.max(0, n - 1));
     }
-  };
+  }, [attemptId, state.attempt?.id, result, MAX_TAB_VIOLATIONS, tabGuardAutoSubmit, toast]);
 
-  // Tab / window / app switch detection
+  // Blur and visibilitychange both fire for the same tab departure. Track the
+  // away/return edge so one switch produces exactly one persisted strike;
+  // focus/visibility restoration rearms the detector for the next switch.
   useEffect(() => {
     if (!guardActive && !lockdownActive) return undefined;
-    const onVisibility = () => { if (document.hidden) bumpViolation(); };
-    const onBlur = () => bumpViolation();
+    const markAway = () => {
+      if (awayRef.current) return;
+      awayRef.current = true;
+      recordViolation('tab/window switch');
+    };
+    const onVisibility = () => {
+      if (document.hidden) markAway();
+      else awayRef.current = false;
+    };
+    const onBlur = () => markAway();
+    const onFocus = () => { if (!document.hidden) awayRef.current = false; };
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
     };
-    /* eslint-disable-next-line */
-  }, [guardActive, lockdownActive, attemptId]);
+  }, [guardActive, lockdownActive, recordViolation]);
+
+  // Restore the persisted tab/guard count when an attempt is opened or resumed.
+  useEffect(() => {
+    if (String(violationAttemptRef.current) !== String(attemptId)) {
+      violationAttemptRef.current = attemptId;
+      violationsRef.current = 0;
+      awayRef.current = false;
+      tabAutoSubmittedRef.current = false;
+      setViolations(0);
+      setPendingTabViolations(0);
+    }
+    if (String(state.attempt?.id) !== String(attemptId)) return;
+    const initial = Number(state.attempt?.tab_violations || 0);
+    if (Number.isFinite(initial) && initial >= 0 && initial > violationsRef.current) {
+      violationsRef.current = initial;
+      setViolations(initial);
+    }
+  }, [attemptId, state.attempt?.id, state.attempt?.tab_violations]);
 
   // Fullscreen lockdown: keep the quiz fullscreen for the whole attempt.
   // Leaving fullscreen (Esc) is a violation and re-shows the lock gate.
@@ -1088,7 +1145,7 @@ export default function QuizAttempt() {
     if (!lockdownActive || !fsSupported) return undefined;
     const onFsChange = () => {
       if (document.fullscreenElement) setShowLockGate(false);
-      else { setShowLockGate(true); bumpViolation(); }
+      else { setShowLockGate(true); recordViolation('fullscreen exit'); }
     };
     document.addEventListener('fullscreenchange', onFsChange);
     if (!document.fullscreenElement) setShowLockGate(true);
@@ -1102,7 +1159,7 @@ export default function QuizAttempt() {
       if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     };
     /* eslint-disable-next-line */
-  }, [lockdownActive, fsSupported]);
+  }, [lockdownActive, fsSupported, recordViolation]);
 
   const enterLockdown = async () => {
     try {
@@ -1193,7 +1250,7 @@ export default function QuizAttempt() {
   }, [lockdownActive, guardActive]);
 
   /* ------------------- 🛑 SAFE EXAM MODE (quiz-creator controlled) -------------------
-     Safe-Exam-Browser-style kiosk layer for live quizzes:
+     Safe-Exam-Browser-style kiosk layer for live quizzes AND module quizzes:
      • hooks & swallows shortcut keys  — F5, F12, Ctrl+R/W/T/N/P/S/U, Alt, etc.
      • blocks right-click, drag, refresh & close (beforeunload warning)
      • DevTools-open heuristic (window suddenly got much wider than the page)
@@ -1201,7 +1258,7 @@ export default function QuizAttempt() {
   const safeModeOn = acOn('exam_safe_mode', true);
   const safeWarnedRef = useRef(false);
   useEffect(() => {
-    if (!safeModeOn || !isLive || result) return undefined;
+    if (!safeModeOn || !acEnforced || result) return undefined;
     const safeWarn = (what) => {
       if (!safeWarnedRef.current) {
         safeWarnedRef.current = true;
@@ -1249,7 +1306,7 @@ export default function QuizAttempt() {
       window.removeEventListener('beforeunload', onBeforeUnload);
     };
     /* eslint-disable-next-line */
-  }, [safeModeOn, isLive, result]);
+  }, [safeModeOn, acEnforced, result]);
 
   /* ------------------- presence heartbeat (host monitor) ------------------- */
   // Tells the server the student is still on the quiz (every 15s) and fires a
@@ -1295,7 +1352,9 @@ export default function QuizAttempt() {
     const list = (state && state.questions) || [];
     const qq = list[current];
     const lim = qq ? Number(qq.time_limit_seconds) || 0 : 0;
-    if (!qq || !lim || !isLive || result) { setQSecondsLeft(null); setQTimeUp(false); return undefined; }
+    // Per-question limits used to be live-only. A module quiz is a supervised
+    // assessment as well, so the same countdown and question lock apply there.
+    if (!qq || !lim || !acEnforced || result) { setQSecondsLeft(null); setQTimeUp(false); return undefined; }
     if (lockedQsRef.current.has(qq.id)) { setQSecondsLeft(0); setQTimeUp(true); return undefined; }
     const key = `odl-qtimer-${attemptId}-${qq.id}`;
     let deadline = 0;
@@ -1323,7 +1382,7 @@ export default function QuizAttempt() {
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
     /* eslint-disable-next-line */
-  }, [attemptId, current, state, isLive, result]);
+  }, [attemptId, current, state, acEnforced, result]);
 
   /* ---- AI detection telemetry (see AI-DETECTION-AUDIT.md) ----
      Previously this counted KEYSTROKES and compared them against pasted
@@ -1400,20 +1459,20 @@ export default function QuizAttempt() {
      PrintScreen key, blank the clipboard afterwards and count it as a strike. */
   const shotBlockOn = acOn('screenshot_block_enabled', true);
   useEffect(() => {
-    if (!shotBlockOn || !isLive || result) return undefined;
+    if (!shotBlockOn || !acEnforced || result) return undefined;
     const onShot = (e) => {
       if (e.key === 'PrintScreen') {
         e.preventDefault();
         e.stopPropagation();
         toast.error('📸 Screenshot not allowed — violation recorded');
         try { if (navigator.clipboard) navigator.clipboard.writeText('Screenshot blocked by SmartODL').catch(() => {}); } catch (_) { /* ignore */ }
-        bumpViolation();
+        recordViolation('screenshot shortcut');
       }
     };
     document.addEventListener('keydown', onShot, true);
     return () => document.removeEventListener('keydown', onShot, true);
     /* eslint-disable-next-line */
-  }, [shotBlockOn, isLive, result]);
+  }, [shotBlockOn, acEnforced, result, recordViolation]);
 
   /* --------------------------- keyboard shortcuts --------------------------- */
   // A–D / 1–4 → pick (or toggle) option · ←/→ → previous/next question.
@@ -1892,6 +1951,11 @@ export default function QuizAttempt() {
   return (
     // coding questions need room for two panes, so the 1200px cap is lifted
     <div className={`exam-wrap ${coding ? 'qz-wide' : ''}`} style={cpBlockActive ? { userSelect: 'none', WebkitUserSelect: 'none' } : undefined}>
+      <ProctorRecordingCapture
+        attemptId={attemptId}
+        active={proctorRecording && proctorConsented && !result}
+        getStreams={proctor.getStreams}
+      />
       {/* ---------------- proctoring consent gate (webcam / screen) ----------------
           Shown BEFORE the lockdown gate: permission prompts cannot be raised
           from inside fullscreen reliably, and the student deserves to read what
@@ -1948,21 +2012,15 @@ export default function QuizAttempt() {
               {proctorSecondCamera && <li><strong>Mobile second camera</strong> — pair your phone so it can view you and your workspace.</li>}
               {proctorIdentity && <li><strong>Identity check</strong> — show your face and ID for host verification.</li>}
               {proctorDualMonitor && <li><strong>Display check</strong> — the browser reports whether more than one display is connected.</li>}
+              {proctorRecording && <li><strong>Optional saved recording</strong> — the host may request webcam + full-screen recording during the attempt. Recording starts only after a separate explicit Allow/Decline choice; if allowed, the recording indicator stays visible and only administrators can play it back.</li>}
             </ul>
             <p className="tiny muted" style={{ maxWidth: 500, margin: '0 auto' }}>
-              {(liveSnapshot || liveWebrtc || proctorSecondCamera) ? (
-                <>
-                  🔒 Live view is enabled for this quiz. Your authorised host can view the enabled
-                  camera/screen feeds during the attempt. <strong>No photo, video or screen recording
-                  is saved</strong>; snapshot frames remain only briefly in server memory, WebRTC goes
-                  directly to the host, and event names are recorded for review.
-                </>
+              {proctorRecording ? (
+                <>🔒 Live checks may send event names. A saved video is <strong>not</strong> started by this consent: if the host requests recording, you will see a separate consent prompt. Only after you choose Allow will webcam + screen video be uploaded to private server storage for the configured retention period; admin-only playback.</>
+              ) : (liveSnapshot || liveWebrtc || proctorSecondCamera) ? (
+                <>🔒 Live view is enabled for this quiz. Your authorised host can view the enabled camera/screen feeds during the attempt. <strong>No photo, video or screen recording is saved</strong>; snapshot frames remain briefly in server memory, WebRTC goes directly to the host, and event names are recorded for review.</>
               ) : (
-                <>
-                  🔒 None of your photos, video, or screen recordings are <strong>saved anywhere</strong> or
-                  <strong> sent to the server</strong>. Everything is checked only inside your browser;
-                  only events (such as “the camera stopped”) are recorded.
-                </>
+                <>🔒 None of your photos, video, or screen recordings are <strong>saved anywhere</strong> or <strong>sent to the server</strong>. Everything is checked only inside your browser; only events (such as “the camera stopped”) are recorded.</>
               )}
             </p>
             <div style={{ margin: '16px 0' }}>
@@ -1986,7 +2044,7 @@ export default function QuizAttempt() {
       )}
 
       {/* ---------------- advanced proctoring preflight: room scan ---------------- */}
-      {proctorOn && !proctorConsented && preflightStep === 'room' && (
+      {proctorOn && !proctorConsented && proctorRoomScan && preflightStep === 'room' && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 3310, background: 'rgba(4,7,18,.99)',
           display: 'grid', placeItems: 'center', textAlign: 'center', padding: 24, overflowY: 'auto',
@@ -2019,7 +2077,7 @@ export default function QuizAttempt() {
       )}
 
       {/* ------------- advanced proctoring preflight: mobile second camera ------------- */}
-      {proctorOn && !proctorConsented && preflightStep === 'second' && (
+      {proctorOn && !proctorConsented && proctorSecondCamera && preflightStep === 'second' && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 3310, background: 'rgba(4,7,18,.99)',
           display: 'grid', placeItems: 'center', textAlign: 'center', padding: 24, overflowY: 'auto',
@@ -2040,7 +2098,7 @@ export default function QuizAttempt() {
       )}
 
       {/* ---------------- advanced proctoring preflight: identity check ---------------- */}
-      {proctorOn && !proctorConsented && preflightStep === 'identity' && (
+      {proctorOn && !proctorConsented && proctorIdentity && preflightStep === 'identity' && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 3310, background: 'rgba(4,7,18,.99)',
           display: 'grid', placeItems: 'center', textAlign: 'center', padding: 24, overflowY: 'auto',
@@ -2049,9 +2107,11 @@ export default function QuizAttempt() {
             <div style={{ fontSize: '3.2rem' }}>🪪</div>
             <h1 style={{ marginTop: 8 }}>Identity check</h1>
             <p className="muted">
-              Look directly at the camera and hold your institute ID beside your face. The host
-              compares the live view with your account profile; no identity photo is saved by this check.
-              {(liveSnapshot || liveWebrtc) && ' Your live camera is already visible to the authorised host for this check.'}
+              Look directly at the camera and hold your institute ID beside your face. This check
+              records that you completed the self-check; no identity photo is saved.
+              {(liveSnapshot || liveWebrtc)
+                ? ' If the live camera feed is connected, the authorised host can visually review this check.'
+                : ' No live camera view is enabled, so the host cannot visually verify you from this check.'}
             </p>
             <div className="row wrap" style={{ gap: 16, justifyContent: 'center', alignItems: 'center' }}>
               <ProctorStreamPreview stream={proctor.getStreams().camera} label="Identity check camera preview" />
@@ -2174,10 +2234,11 @@ export default function QuizAttempt() {
             // lockdown 3200) — a warning hidden behind an overlay is no
             // warning at all.
             position: 'fixed', top: 12, left: '50%', transform: 'translateX(-50%)',
-            zIndex: 3400, maxWidth: 560, padding: '10px 16px', borderRadius: 10,
+            zIndex: 3400, width: 'calc(100vw - 24px)', maxWidth: 560, maxHeight: 'min(30vh, 170px)',
+            overflowY: 'auto', boxSizing: 'border-box', padding: '8px 12px', borderRadius: 10,
             background: 'rgba(120,26,26,.97)', color: '#fff',
             border: '1px solid rgba(255,120,120,.5)', boxShadow: '0 8px 28px rgba(0,0,0,.45)',
-            fontSize: '.92rem', textAlign: 'center',
+            fontSize: 'clamp(.78rem, 2.6vw, .92rem)', lineHeight: 1.35, textAlign: 'center', overflowWrap: 'anywhere',
           }}
         >
           {proctorWarn.msg}
@@ -2251,7 +2312,7 @@ export default function QuizAttempt() {
           </button>
         </div>
       )}
-      {showSecondRepair && proctorConsented && !result && (
+      {showSecondRepair && proctorSecondCamera && proctorConsented && !result && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 3260, background: 'rgba(4,7,18,.98)',
           display: 'grid', placeItems: 'center', textAlign: 'center', padding: 24, overflowY: 'auto',
@@ -2284,15 +2345,18 @@ export default function QuizAttempt() {
         && !(proctorCamera && proctorConsented && !result && cameraGateDue) && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 3200, background: 'rgba(4,7,18,.99)',
-          display: 'grid', placeItems: 'center', textAlign: 'center', padding: 24,
+          display: 'grid', placeItems: 'center', textAlign: 'center', padding: 'clamp(10px, 3vw, 24px)',
+          boxSizing: 'border-box', overflow: 'hidden', overscrollBehavior: 'contain',
         }}>
-          <div style={{ maxWidth: 520 }}>
-            <div style={{ fontSize: '3.4rem' }}>🔒</div>
-            <h1 style={{ marginTop: 8 }}>Secure Lockdown Mode</h1>
+          <div style={{ width: 'min(100%, 520px)', maxHeight: 'calc(100dvh - 24px)', margin: 'auto' }}>
+            <div style={{ fontSize: 'clamp(2rem, 8vh, 3rem)', lineHeight: 1.1 }}>🔒</div>
+            <h1 style={{ margin: '8px 0', fontSize: 'clamp(1.25rem, 4.8vw, 1.8rem)' }}>Secure Lockdown Mode</h1>
             <p className="muted">
-              This is a secure live quiz. It must be attempted in <strong>fullscreen lockdown</strong> —
+              {isLive ? 'This is a secure live quiz.' : 'This is a supervised module quiz.'} It must be
+              attempted in <strong>fullscreen lockdown</strong> —
               tab switching, refreshing, copy-paste, right-clicking, and other applications are not allowed.
               Leaving fullscreen records a violation.
+              {isModuleQuiz && <><br /><strong>No camera and no screen share are used in a module quiz.</strong></>}
             </p>
             <div style={{ margin: '12px 0' }}>
               <span className="badge red" style={{ fontSize: '.9rem', padding: '6px 12px' }}>
@@ -2311,28 +2375,38 @@ export default function QuizAttempt() {
       {tabWarning && guardActive && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 3000, background: 'rgba(4,7,18,.97)',
-          display: 'grid', placeItems: 'center', textAlign: 'center', padding: 24,
+          display: 'grid', placeItems: 'center', textAlign: 'center', padding: 'clamp(10px, 3vw, 24px)',
+          boxSizing: 'border-box', overflow: 'hidden', overscrollBehavior: 'contain',
         }}>
-          <div style={{ maxWidth: 480 }}>
-            <div style={{ fontSize: '3.4rem' }}>🚫</div>
-            <h1 style={{ marginTop: 8 }}>Tab switch detected!</h1>
+          <div style={{ width: 'min(100%, 460px)', maxHeight: 'calc(100dvh - 24px)', margin: 'auto' }}>
+            <div style={{ fontSize: 'clamp(2rem, 8vh, 2.8rem)', lineHeight: 1.1 }}>🚫</div>
+            <h1 style={{ margin: '8px 0', fontSize: 'clamp(1.25rem, 4.8vw, 1.8rem)' }}>
+              {tabWarningReason === 'tab/window switch' ? 'Tab switch detected!'
+                : tabWarningReason === 'fullscreen exit' ? 'Fullscreen exit detected!'
+                  : 'Screenshot shortcut blocked'}
+            </h1>
             <p className="muted">
-              Switching tabs or windows during a live quiz is not allowed.
-              This violation is visible to the host on the monitoring screen.
+              {tabWarningReason === 'tab/window switch'
+                ? 'Switching tabs or windows during a live quiz is not allowed.'
+                : tabWarningReason === 'fullscreen exit'
+                  ? 'Leaving fullscreen during a live quiz is not allowed.'
+                  : 'Screenshot shortcuts are blocked during this live quiz.'}
+              {' '}This guard violation is visible to the host.
             </p>
             <div style={{ margin: '14px 0' }}>
               <span className="badge red" style={{ fontSize: '.95rem', padding: '7px 14px' }}>
-                Violation {violations} / {MAX_TAB_VIOLATIONS}
+                Violation {violations + pendingTabViolations} / {MAX_TAB_VIOLATIONS}
               </span>
             </div>
-            <p className="small muted">
+            {pendingTabViolations > 0 && <p className="tiny muted" style={{ margin: '6px 0' }}>Syncing count…</p>}
+            <p className="small muted" style={{ margin: '8px 0' }}>
               {tabGuardAutoSubmit
                 ? (MAX_TAB_VIOLATIONS - violations <= 1
-                  ? '⚠ Final warning — the next switch will submit the quiz automatically!'
-                  : `${MAX_TAB_VIOLATIONS - violations} more switch(es) will submit the quiz automatically.`)
-                : 'The limit has been exceeded — every further violation is being reported to the host.'}
+                  ? '⚠ Final warning — the next guard violation will submit the quiz automatically!'
+                  : `${MAX_TAB_VIOLATIONS - violations} more guard violation(s) will submit the quiz automatically.`)
+                : 'This guard violation is reported to the host; the quiz will not auto-submit.'}
             </p>
-            <button className="btn btn-primary mt" onClick={() => setTabWarning(false)}>↩ Return to the quiz</button>
+            <button className="btn btn-primary" style={{ marginTop: 8 }} onClick={() => setTabWarning(false)}>↩ Return to the quiz</button>
           </div>
         </div>
       )}
@@ -2358,6 +2432,11 @@ export default function QuizAttempt() {
           </span>
           <span className="tag">{answeredCount}/{questions.length} answered</span>
           {isLive && <span className="tag" title="Question numbers are individualized and stable for your attempt">🔀 Personal order</span>}
+          {isModuleQuiz && (
+            <span className="tag" title="Module quiz — anti-cheat on, but never a camera or a screen share">
+              📚 Module quiz · no camera
+            </span>
+          )}
           {lockdownActive && (
             <span className="tag" title="Fullscreen lockdown — you must stay in fullscreen; refresh and devtools are blocked">🔒 Lockdown</span>
           )}
