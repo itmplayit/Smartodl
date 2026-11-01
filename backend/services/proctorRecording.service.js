@@ -60,7 +60,7 @@ async function ensureSchema() {
        INDEX idx_proctor_recording_cleanup (status, ended_at, last_activity_at),
        CONSTRAINT fk_proctor_recording_attempt FOREIGN KEY (attempt_id)
          REFERENCES quiz_attempts(id) ON DELETE CASCADE
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   );
   await exec(
     `CREATE TABLE IF NOT EXISTS proctor_recording_files (
@@ -76,7 +76,7 @@ async function ensureSchema() {
        UNIQUE KEY uq_proctor_recording_feed (session_id, feed),
        CONSTRAINT fk_proctor_recording_file_session FOREIGN KEY (session_id)
          REFERENCES proctor_recording_sessions(session_id) ON DELETE CASCADE
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   );
   await cleanupExpired().catch((error) => console.warn('[proctor-recording] initial cleanup failed:', error.message));
   startCleanupTimer();

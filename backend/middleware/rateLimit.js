@@ -31,8 +31,29 @@ if (redisClient) {
     console.warn('[ratelimit] REDIS_URL is set but rate-limit-redis is unavailable — falling back to memory store:', err.message);
   }
 }
+/**
+ * Default budget key: the ACCOUNT when the caller is signed in, the IP when not.
+ *
+ * The built-in default is per-IP, which means a whole computer lab behind one
+ * NAT address shares a single budget — the 20 submissions/minute cap is not 20
+ * per student, it is 20 for everyone on that address, and one abusive account
+ * can spend the entire lab's quota. Per-account keys also stop a single
+ * attacker from hiding behind a large pool of addresses.
+ *
+ * Anonymous traffic must still be counted by IP: there is no account to key on
+ * yet, and keying the login endpoint by anything the request carries would let
+ * an attacker choose their own bucket.
+ */
+const accountKey = (req) => {
+  const id = req.user && req.user.id;
+  return id ? `user:${id}` : `ip:${req.ip}`;
+};
+
 const make = ({ prefix = 'api', ...opts }) => rateLimit({
   standardHeaders: true, legacyHeaders: false, skip: disabled,
+  // Listed before ...opts so the proctoring and second-camera limiters keep
+  // the explicit key generators they already pass.
+  keyGenerator: accountKey,
   ...(redisClient && RedisStore
     ? { store: new RedisStore({ sendCommand: (...args) => redisClient.call(...args), prefix: `sodl:rl:${prefix}:` }) }
     : {}),

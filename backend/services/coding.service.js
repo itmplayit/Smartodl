@@ -24,7 +24,7 @@ async function ensureSchema() {
          FOREIGN KEY (submission_id) REFERENCES coding_submissions(id) ON DELETE CASCADE,
        CONSTRAINT fk_submission_results_test_case
          FOREIGN KEY (test_case_id) REFERENCES coding_test_cases(id) ON DELETE SET NULL
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   );
 }
 

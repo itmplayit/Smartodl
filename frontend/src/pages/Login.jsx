@@ -7,6 +7,7 @@ import { ROLE_HOME } from '../utils/constants';
 import { BrandMark, BrandLogo } from '../components/Brand';
 import { GoogleIcon, GithubIcon } from '../components/OAuthIcons';
 import Icon from '../components/Icon';
+import CaptchaField from '../components/CaptchaField';
 
 const OAUTH_ERRORS = {
   google_not_configured: 'Google sign-in is currently unavailable.',
@@ -30,6 +31,7 @@ export default function Login() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [providers, setProviders] = useState({ google: false, github: false });
+  const [captcha, setCaptcha] = useState({});
 
   useEffect(() => {
     if (params.get('expired')) toast.info('Your session expired — please login again');
@@ -58,7 +60,7 @@ export default function Login() {
     e.preventDefault();
     setBusy(true); setError('');
     try {
-      const logged = await login({ email: form.email, password: form.password });
+      const logged = await login({ email: form.email, password: form.password, ...captcha });
       const firstName = String(logged.full_name || '').trim().split(' ')[0];
       toast.success(firstName ? `Welcome back, ${firstName}!` : 'Welcome back!');
       // the redirect effect above takes it from here
@@ -133,6 +135,8 @@ export default function Login() {
               <span className="small muted with-ico"><Icon name="shield" size={15} />Secure session on this device</span>
               <Link className="link small" to="/forgot-password">Forgot password?</Link>
             </div>
+
+            <CaptchaField onChange={setCaptcha} disabled={busy} />
 
             <button className="btn btn-primary btn-block mt" disabled={busy}>
               {busy ? 'Signing in…' : 'Login'}

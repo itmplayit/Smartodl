@@ -4,6 +4,7 @@ const path = require('path');
 const { q, q1, exec } = require('../config/db');
 const { ApiError, asyncHandler, ok, created } = require('../utils/helpers');
 const builder = require('../services/landing-builder.service');
+const cache = require('../services/cache.service');
 const { publicUrl, UPLOAD_ROOT } = require('../middleware/upload');
 
 async function hasValidImageSignature(file) {
@@ -27,13 +28,34 @@ async function safelyRemoveMediaFile(url) {
   try { await fs.unlink(file); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
 
-const publicPage = asyncHandler(async (req, res) => ok(res, await builder.getPublic()));
+const publicPage = asyncHandler(async (req, res) => {
+  // The published landing document only changes when an admin publishes, and
+  // publish() clears this key. Every anonymous visit was re-reading it.
+  const doc = await cache.cached('landing:public', 300, () => builder.getPublic());
+  ok(res, doc);
+});
 const editor = asyncHandler(async (req, res) => ok(res, await builder.getBuilder()));
 const saveDraft = asyncHandler(async (req, res) => ok(res, await builder.saveDraft(req.body.document, req.user.id, req.body.base_version)));
-const publish = asyncHandler(async (req, res) => ok(res, await builder.publish(req.user.id, req.body.base_version)));
-const revertDraft = asyncHandler(async (req, res) => ok(res, await builder.revertDraft(req.user.id)));
+// Every mutation that can change the published document must drop the cached
+// copy, or an admin publishes and the public site keeps showing the old page.
+const dropLandingCache = () => cache.del('landing:public');
+
+const publish = asyncHandler(async (req, res) => {
+  const result = await builder.publish(req.user.id, req.body.base_version);
+  await dropLandingCache();
+  ok(res, result);
+});
+const revertDraft = asyncHandler(async (req, res) => {
+  const result = await builder.revertDraft(req.user.id);
+  await dropLandingCache();
+  ok(res, result);
+});
 const listRevisions = asyncHandler(async (req, res) => ok(res, await builder.revisions()));
-const restoreRevision = asyncHandler(async (req, res) => ok(res, await builder.restoreRevision(Number(req.params.id), req.user.id)));
+const restoreRevision = asyncHandler(async (req, res) => {
+  const result = await builder.restoreRevision(Number(req.params.id), req.user.id);
+  await dropLandingCache();
+  ok(res, result);
+});
 
 const listMedia = asyncHandler(async (req, res) => {
   const rows = await q('SELECT id, file_name, original_name, url, mime_type, file_size, alt_text, created_at FROM landing_media ORDER BY id DESC LIMIT 250');

@@ -352,7 +352,7 @@ async function ensureSchema() {
        INDEX idx_proctor_attempt (attempt_id, occurred_at),
        CONSTRAINT fk_proctor_attempt FOREIGN KEY (attempt_id)
          REFERENCES quiz_attempts(id) ON DELETE CASCADE
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   );
 }
 

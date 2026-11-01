@@ -18,6 +18,8 @@ const subs = require('../controllers/subscription.controller');
 const lessonMedia = require('../controllers/lessonMedia.controller');
 
 const { authenticate, optionalAuth, authorize, requirePermission } = require('../middleware/auth');
+const captcha = require('../services/captcha.service');
+const { requireCaptcha } = require('../middleware/captcha');
 const {
   notesUpload, imageUpload, avatarUpload, bannerUpload, landingMediaUpload,
   lessonVideoUpload, lessonPdfUpload,
@@ -82,14 +84,20 @@ router.get('/health', async (req, res) => {
 });
 
 /* -------------------------------- auth -------------------------------- */
-router.post('/auth/register', authLimiter, auth.register);
-router.post('/auth/login', authLimiter, auth.login);
+router.post('/auth/register', authLimiter, requireCaptcha, auth.register);
+router.post('/auth/login', authLimiter, requireCaptcha, auth.login);
 router.post('/auth/refresh', authLimiter, auth.refresh);
 router.post('/auth/logout', optionalAuth, auth.logout);
-router.post('/auth/forgot-password', authLimiter, auth.forgotPassword);
+router.post('/auth/forgot-password', authLimiter, requireCaptcha, auth.forgotPassword);
 router.post('/auth/reset-password', authLimiter, auth.resetPassword);
 router.post('/auth/change-password', authenticate, writeLimiter, auth.changePassword);
 router.get('/auth/me', authenticate, auth.me);
+// Device/session visibility (see #13/#14): the data was always stored, never exposed.
+router.get('/auth/sessions', authenticate, auth.mySessions);
+router.delete('/auth/sessions/:id', authenticate, auth.revokeSession);
+// CAPTCHA: config is public (it is just a site key); challenges are minted per attempt.
+router.get('/captcha/config', (_req, res) => res.json({ success: true, data: captcha.publicConfig() }));
+router.get('/captcha/challenge', (_req, res) => res.json({ success: true, data: captcha.createChallenge() }));
 router.get('/auth/providers', auth.providers);
 
 /** OAuth 2.0 — providers must be configured and explicitly enabled by an admin. */

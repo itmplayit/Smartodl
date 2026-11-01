@@ -148,6 +148,80 @@ const RUN_AS = process.env.JUDGE_RUN_AS === '' ? null : (process.env.JUDGE_RUN_A
 const SANDBOX_MODE = (!IS_WINDOWS && RUN_AS) ? 'posix' : 'none';
 
 /* ------------------------------------------------------------------ */
+/* filesystem isolation (bubblewrap)                                    */
+/* ------------------------------------------------------------------ */
+const SANDBOX = require('./sandbox');
+
+/**
+ * The uid/gid to map to when sudo cannot perform a real privilege drop.
+ * Resolved once; `bwrap --uid` is NOT a privilege drop, so the filesystem,
+ * network, PID, rlimit and memory confinement is the boundary in that mode.
+ */
+let mappedIds = null;
+function mappedUidGid() {
+  if (mappedIds !== null) return mappedIds;
+  mappedIds = { uid: 65534, gid: 65534 };
+  if (RUN_AS && process.platform !== 'win32') {
+    try {
+      const out = require('child_process')
+        .execSync(`id -u ${JSON.stringify(RUN_AS)} && id -g ${JSON.stringify(RUN_AS)}`, {
+          stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000,
+        }).toString().trim().split(/\s+/);
+      if (out.length >= 2) mappedIds = { uid: Number(out[0]) || 65534, gid: Number(out[1]) || 65534 };
+    } catch (_) { /* keep nobody */ }
+  }
+  return mappedIds;
+}
+
+/**
+ * The bubblewrap layer for one run, or null when this host cannot build a
+ * private root. Production refuses to boot in that case (see enforceSandbox()).
+ */
+function sandboxLayer(opts) {
+  const probe = SANDBOX.filesystemIsolationAvailable();
+  if (!probe.ok) return null;
+  const { uid, gid } = mappedUidGid();
+  try {
+    return SANDBOX.buildFsSandbox({
+      dir: opts && opts.dir,
+      network: !!(opts && opts.network),
+      runAs: RUN_AS,
+      uid,
+      gid,
+    });
+  } catch (err) {
+    console.warn(`[judge] filesystem sandbox unavailable: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Fail closed. `unshare -n` alone is not a security boundary — without a
+ * private root a submission reads every world-readable file on the host. An
+ * operator may opt out explicitly on a trusted, disposable machine.
+ */
+function enforceSandbox() {
+  if (SANDBOX_MODE !== 'posix') return { ok: true, mode: SANDBOX_MODE, filesystem_isolation: false };
+  const probe = SANDBOX.filesystemIsolationAvailable();
+  if (probe.ok) return { ok: true, mode: 'bubblewrap', filesystem_isolation: true, drop: SANDBOX.sudoDropAvailable(RUN_AS) ? 'sudo-drop' : 'uid-map' };
+  const allowed = ['1', 'true', 'yes', 'on'].includes(String(process.env.JUDGE_ALLOW_UNSANDBOXED || '').trim().toLowerCase());
+  const production = String(process.env.NODE_ENV || '').trim().toLowerCase() === 'production';
+  if (production && !allowed) {
+    throw new Error(
+      'This host cannot give each submission a private filesystem root, so submitted code would read '
+      + 'every world-readable file on this machine. Install bubblewrap (apt install bubblewrap) and enable '
+      + 'unprivileged user namespaces. To accept the risk on a disposable machine only, set JUDGE_ALLOW_UNSANDBOXED=1. '
+      + `Reason: ${probe.reason}`,
+    );
+  }
+  if (!allowed) {
+    console.warn(`[judge] WARNING: running submissions WITHOUT filesystem isolation — ${probe.reason}`);
+    console.warn('[judge]          submitted code can read any world-readable file on this host.');
+  }
+  return { ok: false, mode: SANDBOX_MODE, filesystem_isolation: false, reason: probe.reason };
+}
+
+/* ------------------------------------------------------------------ */
 /* command building                                                     */
 /* ------------------------------------------------------------------ */
 /**
@@ -253,13 +327,19 @@ function wrapperArgs(dir, limits, ns) {
 function buildCommand(cmd, args, limits, opts = {}) {
   if (SANDBOX_MODE !== 'posix') return { command: cmd, args };   // Windows: run directly
 
+  // The bubblewrap layer, when this host can build a private root. It composes
+  // with the wrappers because they end with `prlimit … -- "$@"`, so bwrap
+  // becomes the program prlimit execs and builds the filesystem for the run.
+  const fsx = sandboxLayer(opts);
+
   if (SANDBOX_WRAPPERS.enabled) {
     if (!opts.dir) throw new Error('sandbox wrappers mode requires opts.dir (the run work directory)');
     // The wrapper itself does chown/chmod, unshare, the sudo drop and prlimit;
     // it validates every argument and refuses anything outside the run root.
     let ns = opts.network ? '' : 'n';
     if (supportsPidNamespace()) ns = `${ns ? `${ns},` : ''}pid,fork,mount-proc`;
-    return { command: 'sudo', args: [...wrapperArgs(opts.dir, limits, ns), cmd, ...args] };
+    const payload = fsx ? [...fsx.args, cmd, ...args] : [cmd, ...args];
+    return { command: 'sudo', args: ['-n', WRAP_EXEC, ...wrapperArgs(opts.dir, limits, ns), ...payload] };
   }
 
   const limitArgs = [
@@ -272,6 +352,17 @@ function buildCommand(cmd, args, limits, opts = {}) {
     '--core=0',
   ];
   const drop = ['-u', RUN_AS, 'prlimit', ...limitArgs, '--', cmd, ...args];
+
+  /* ---- preferred path: a private root, with rlimits applied inside it ----
+   * prlimit lives under /usr, which the allowlist mounts read-only, so it can
+   * run inside the sandbox and cap the program it then execs. */
+  if (fsx) {
+    const inner = ['prlimit', ...limitArgs, '--', cmd, ...args];
+    if (fsx.dropUser) {
+      return { command: 'sudo', args: ['-n', '-u', fsx.dropUser, fsx.bin, ...fsx.args, ...inner] };
+    }
+    return { command: fsx.bin, args: [...fsx.args, ...inner] };
+  }
   // `unshare` must run before privileges are dropped, hence the nested sudo.
   if (opts.network) {
     // The network stays (MySQL on loopback), but a private PID namespace +
@@ -332,4 +423,5 @@ module.exports = {
   IS_WINDOWS, IS_MAC, SANDBOX_MODE, RUN_AS,
   findBinary, binName, buildCommand, childEnv, killTree, defaultWorkdir,
   SANDBOX_WRAPPERS,
+  enforceSandbox, SANDBOX,
 };

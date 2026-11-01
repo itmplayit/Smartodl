@@ -7,6 +7,7 @@ import { useTheme } from '../context/ThemeContext';
 import { useToast } from '../context/ToastContext';
 import Switch from '../components/Switch';
 import Icon from '../components/Icon';
+import { useCallback } from 'react';
 
 const PREF_KEY = 'smartodl.prefs';
 const NOTIFICATIONS = [
@@ -78,6 +79,7 @@ export default function Settings() {
           </section>
 
           <SecurityCard />
+          <SessionsCard />
         </div>
 
         <aside className="stack settings-aside" aria-label="Account information">
@@ -148,5 +150,91 @@ function SecurityCard() {
       <button className="btn btn-primary mt" disabled={busy}>{busy ? 'Updating password…' : 'Change password'}</button>
       <div className="security-note mt"><Icon name="shield" size={17} /><span>Access tokens are short-lived and refresh tokens rotate on renewal.</span></div>
     </form>
+  );
+}
+
+
+/**
+ * Active devices / sessions.
+ *
+ * The backend has always recorded a user-agent and IP per refresh token, but
+ * until now nothing displayed them — so a session the user did not recognise
+ * was invisible until it was used. This lists them and lets the user revoke
+ * any single one (the existing "log out everywhere" button covers the rest).
+ */
+function SessionsCard() {
+  const toast = useToast();
+  const [sessions, setSessions] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const { data } = await sessionsApi.list();
+      setSessions(data?.data?.sessions || []);
+    } catch (_err) {
+      setSessions([]); // never break the settings page over this
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const revoke = async (session) => {
+    setBusyId(session.id);
+    try {
+      await sessionsApi.revoke(session.id);
+      toast.success(session.current ? 'This device signed out.' : 'Device signed out.');
+      if (session.current) { window.location.assign('/login'); return; }
+      await load();
+    } catch (err) {
+      toast.error(err.message || 'Could not sign out that device.');
+    } finally { setBusyId(null); }
+  };
+
+  const fmt = (iso) => {
+    if (!iso) return '—';
+    try { return new Date(iso).toLocaleString(); } catch (_e) { return String(iso); }
+  };
+
+  return (
+    <section className="card">
+      <div className="card-title-row">
+        <span><Icon name="shield" size={20} /></span>
+        <div>
+          <h2>Active devices</h2>
+          <p>Every browser or phone currently signed in to your account.</p>
+        </div>
+      </div>
+
+      {sessions === null && <p className="small muted mt-s">Loading…</p>}
+      {sessions && sessions.length === 0 && (
+        <p className="small muted mt-s">No other active sessions found.</p>
+      )}
+
+      {sessions && sessions.length > 0 && (
+        <div className="detail-list mt-s">
+          {sessions.map((s) => (
+            <div className="session-row" key={s.id}>
+              <div className="session-meta">
+                <span className="session-device">
+                  <Icon name="laptop" size={15} /> {s.device}
+                  {s.current && <span className="badge">This device</span>}
+                </span>
+                <span className="small muted">
+                  {s.ip ? `IP ${s.ip} · ` : ''}Last used {fmt(s.last_used_at)}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={busyId === s.id}
+                onClick={() => revoke(s)}
+              >
+                {busyId === s.id ? 'Signing out…' : 'Sign out'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }

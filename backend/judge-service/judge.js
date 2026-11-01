@@ -28,7 +28,8 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PLATFORM = require('./lib/platform');
-const { IS_WINDOWS, SANDBOX_MODE, RUN_AS, findBinary, binName, buildCommand, childEnv, killTree, defaultWorkdir, SANDBOX_WRAPPERS } = PLATFORM;
+const { IS_WINDOWS, SANDBOX_MODE, RUN_AS, findBinary, binName, buildCommand, childEnv, killTree, defaultWorkdir, SANDBOX_WRAPPERS, enforceSandbox } = PLATFORM;
+const SANDBOX = require('./lib/sandbox');
 
 const PORT = Number(process.env.JUDGE_PORT || process.env.PORT || 2358);
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
@@ -47,6 +48,44 @@ const COMPILE_TIMEOUT = 15000;         // ms
 const DEFAULT_RUN_TIMEOUT = 2000;      // ms
 const DEFAULT_MEMORY = 262144;         // KB
 const MAX_BATCH_TESTS = 60;
+// Compilers are the heaviest thing the worker runs (javac reserves a large
+// address range). This is a hard RSS ceiling for the compile phase so a
+// pathological source file cannot exhaust the host; the per-run limit below
+// governs the student's program itself.
+const COMPILE_MEMORY_LIMIT_KB = 2 * 1024 * 1024;
+
+/**
+ * RSS head-room added to a problem's memory limit before it is enforced.
+ *
+ * The measured figure is the WHOLE process tree, so it includes the runtime
+ * itself — and that is not the student's allocation. V8 needs ~32 MB just to
+ * start, CPython ~15 MB, the JVM considerably more. Comparing the raw total
+ * against the configured limit therefore failed every JavaScript program the
+ * moment the limit was set anywhere near those baselines (a correct
+ * "print n*2" was reported as using 32 MB against a 16 MB cap).
+ *
+ * What is enforced is `problem limit + this allowance`, so the student still
+ * gets roughly the configured amount of their own memory, and the host is
+ * still protected. This is the same shape of allowance Judge0 applies.
+ */
+const MEMORY_RUNTIME_ALLOWANCE_KB = {
+  javascript: 64 * 1024,
+  java: 192 * 1024,
+  python: 32 * 1024,
+  c: 8 * 1024,
+  cpp: 8 * 1024,
+  sql: 8 * 1024,
+};
+const memoryAllowanceKb = (langKey) => {
+  // Number('') is 0, not NaN — without the empty-string check the override
+  // branch always won and silently reduced every allowance to zero.
+  const raw = String(process.env.JUDGE_MEMORY_ALLOWANCE_KB || '').trim();
+  if (raw !== '') {
+    const override = Number(raw);
+    if (Number.isFinite(override) && override >= 0) return override;
+  }
+  return MEMORY_RUNTIME_ALLOWANCE_KB[String(langKey).toLowerCase()] || 32 * 1024;
+};
 const WORKERS = defaultWorkdir();          // os.tmpdir() on Windows, /tmp elsewhere
 const SQL_FIXTURE = path.join(__dirname, 'assets', 'sql-fixture.sql');
 const SQL_ENABLED = process.env.SQL_SANDBOX_ENABLED === 'true';
@@ -152,6 +191,10 @@ function sandboxDiagnostics() {
 }
 
 const SANDBOX_DIAGNOSTICS = sandboxDiagnostics();
+// A private filesystem root is not optional in production: `unshare -n` alone
+// leaves every world-readable host file readable by submitted code. This throws
+// on a host that cannot build one unless the operator opts out explicitly.
+const FS_ISOLATION = enforceSandbox();
 if (process.env.NODE_ENV === 'production' && !SANDBOX_DIAGNOSTICS.ready) {
   throw new Error(`Production judge sandbox is not ready: ${JSON.stringify(SANDBOX_DIAGNOSTICS)}`);
 }
@@ -387,7 +430,7 @@ async function sweepStaleWorkdirs() {
 }
 
 /** Spawn a process, feed stdin, enforce wall-clock timeout, kill the whole tree. */
-function execute({ command, args, cwd, stdin = '', timeoutMs, env }) {
+function execute({ command, args, cwd, stdin = '', timeoutMs, env, memoryLimitKb = 0 }) {
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn(command, args, {
@@ -401,6 +444,11 @@ function execute({ command, args, cwd, stdin = '', timeoutMs, env }) {
 
     let stdout = '', stderr = '', killedByTimeout = false, settled = false;
     const memory = peakMemorySampler(child.pid);
+    // peakMemorySampler only MEASURES. The guard is what ENFORCES: without it a
+    // runtime exempt from RLIMIT_AS (the JVM, V8) had no ceiling at all, and
+    // even a measured overrun was ignored unless the program happened to exit
+    // non-zero.
+    const guard = memoryLimitKb > 0 ? SANDBOX.memoryGuard(child.pid, memoryLimitKb) : null;
     const timer = setTimeout(() => {
       killedByTimeout = true;
       killTree(child);
@@ -416,8 +464,14 @@ function execute({ command, args, cwd, stdin = '', timeoutMs, env }) {
     child.on('close', (code) => {
       if (settled) return;
       settled = true; clearTimeout(timer);
-      const memoryKb = memory.stop();
-      resolve({ stdout, stderr, code, time: Date.now() - started, killedByTimeout, memoryKb });
+      const sampled = memory.stop();
+      const enforced = guard ? guard.stop() : null;
+      const memoryKb = Math.max(sampled, (enforced && enforced.peakKb) || 0);
+      resolve({
+        stdout, stderr, code, time: Date.now() - started, killedByTimeout, memoryKb,
+        memoryExceeded: !!(enforced && enforced.exceeded),
+        memoryMode: enforced ? enforced.mode : 'sampler-only',
+      });
     });
 
     // A program may exit before consuming stdin. Without this handler Node
@@ -528,7 +582,7 @@ async function runSingle({ language, sourceCode, stdin = '', timeLimitMs = DEFAU
       const cargs = isJava ? cargsBase.map((a) => (a === 'Main.java' ? srcFile : a)) : cargsBase;
       const compileAs = String(language).toLowerCase() === 'java' ? 5 * 1024 * 1024 * 1024 : 2 * 1024 * 1024 * 1024;
       const { command, args } = buildCommand(cbin, cargs, { cpuSec: Math.ceil(COMPILE_TIMEOUT / 1000), as: compileAs, nproc: 128, fsize: 64 * 1024 * 1024 }, { dir });
-      const c = await execute({ command, args, cwd: dir, timeoutMs: COMPILE_TIMEOUT });
+      const c = await execute({ command, args, cwd: dir, timeoutMs: COMPILE_TIMEOUT, memoryLimitKb: COMPILE_MEMORY_LIMIT_KB });
       if (c.killedByTimeout || c.code !== 0) {
         let cmsg = truncate(c.stderr || c.stdout);
         if (c.spawnError) {
@@ -571,13 +625,16 @@ async function runSingle({ language, sourceCode, stdin = '', timeLimitMs = DEFAU
     const langKey = String(language).toLowerCase();
     const asLimit = VM_RUNTIMES.has(langKey) ? lang.limit.as : (memKb + 64 * 1024) * 1024;
 
+    // The ceiling actually enforced: the problem's limit plus the runtime's own
+    // unavoidable footprint. (See MEMORY_RUNTIME_ALLOWANCE_KB above.)
+    const enforcedMemKb = memKb + memoryAllowanceKb(langKey);
     const { command, args } = buildCommand(rbin, rargs, {
       cpuSec: Math.ceil(runTimeout / 1000) + 1,
       as: asLimit,
       nproc: lang.limit.nproc,
       fsize: 32 * 1024 * 1024,
     }, { dir });
-    const r = await execute({ command, args, cwd: dir, stdin, timeoutMs: runTimeout + 500 });
+    const r = await execute({ command, args, cwd: dir, stdin, timeoutMs: runTimeout + 500, memoryLimitKb: enforcedMemKb });
 
     if (r.killedByTimeout) {
       return { status: STATUS.TLE, stdout: truncate(r.stdout), stderr: truncate(r.stderr), compile_output: '', time: runTimeout / 1000, memory: memMb(r.memoryKb), exit_code: r.code };
@@ -589,6 +646,26 @@ async function runSingle({ language, sourceCode, stdin = '', timeLimitMs = DEFAU
         compile_output: '', time: r.time / 1000, memory: 0, exit_code: -1,
       };
     }
+    // MEMORY IS A LIMIT WHETHER OR NOT THE PROGRAM EXITED CLEANLY.
+    // MLE used to be decided only inside the `r.code !== 0` branch below, so a
+    // run measured at 297 MB against a 16 MB cap was reported Accepted purely
+    // because it finished with status 0. The guard above also kills a tree that
+    // crosses the ceiling, which is what finally enforces it for the JVM and V8
+    // (they stay exempt from RLIMIT_AS because they reserve huge virtual ranges
+    // up front and --as kills them before they start).
+    if (r.memoryExceeded || (r.memoryKb && r.memoryKb > enforcedMemKb)) {
+      return {
+        status: STATUS.MLE,
+        stdout: truncate(r.stdout),
+        stderr: `Memory limit exceeded — the program used ${memMb(r.memoryKb)} MB and the limit for this problem is ${Math.round(memKb / 1024)} MB.\n${truncate(r.stderr, 2000)}`,
+        compile_output: '',
+        time: r.time / 1000,
+        memory: memMb(r.memoryKb),
+        exit_code: r.code,
+        memory_mode: r.memoryMode,
+      };
+    }
+
     if (r.code !== 0) {
       // died right at the limit (or the kernel shot it for using too much) -> MLE
       const atCeiling = r.memoryKb && r.memoryKb >= memKb * 0.9;
@@ -709,12 +786,17 @@ app.get('/health', (req, res) => {
   const sandboxReady = process.env.NODE_ENV === 'production'
     ? SANDBOX_DIAGNOSTICS.ready
     : (SANDBOX_MODE !== 'posix' || SANDBOX_DIAGNOSTICS.ready);
-  const healthy = diagnostics.ready_languages.length > 0 && sandboxReady;
+  // Without a private root the worker is not safe to use, so /health says so
+  // even though it will still answer (a hard failure belongs at boot, above).
+  const healthy = diagnostics.ready_languages.length > 0 && sandboxReady && FS_ISOLATION.filesystem_isolation;
   res.status(healthy ? 200 : 503).json({
     status: healthy ? 'ok' : 'degraded', service: 'smartodl-judge', engine: 'local-sandbox',
     platform: process.platform, sandbox: SANDBOX_MODE, runAs: RUN_AS || process.env.USER || 'current-user',
     sandbox_ready: SANDBOX_DIAGNOSTICS.ready,
     sandbox_diagnostics: SANDBOX_DIAGNOSTICS,
+    filesystem_isolation: FS_ISOLATION.filesystem_isolation,
+    filesystem_isolation_mode: FS_ISOLATION.mode,
+    memory_limit: SANDBOX.cgroupAvailable().ok ? 'cgroup' : 'rss-sampler',
     // Only languages whose complete toolchain exists. The old filter said
     // every language was ready whenever any one binary existed.
     languages: diagnostics.ready_languages,
@@ -847,6 +929,8 @@ app.listen(PORT, HOST, () => {
   console.log(`[judge] SmartODL sandbox worker listening on http://${HOST}:${PORT}`);
   console.log(`[judge] platform=${process.platform}  sandbox=${SANDBOX_MODE}  run-as=${RUN_AS || 'current user'}  concurrency=${MAX_CONCURRENCY}`);
   console.log(`[judge] sandbox ready=${SANDBOX_DIAGNOSTICS.ready}  diagnostics=${JSON.stringify(SANDBOX_DIAGNOSTICS)}`);
+  console.log(`[judge] filesystem isolation=${FS_ISOLATION.filesystem_isolation ? `yes (${FS_ISOLATION.mode}, drop=${FS_ISOLATION.drop || 'uid-map'})` : `NO — ${FS_ISOLATION.reason || 'unavailable'}`}`);
+  console.log(`[judge] memory limit=${SANDBOX.cgroupAvailable().ok ? 'cgroup v2' : 'aggregate-RSS sampler'}  toolchain mounts=${SANDBOX.RO_BINDS_DEFAULT.filter((x) => { try { require('fs').accessSync(x); return true; } catch (_) { return false; } }).join(' ')}`);
   console.log(`[judge] workdir=${WORKERS}`);
   console.log(`[judge] toolchains found: ${found.join(', ') || 'none'}`);
   console.log(`[judge] languages ready: ${diagnostics.ready_languages.join(', ') || 'none'}`);

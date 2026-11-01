@@ -30,7 +30,7 @@ async function ensureSchema() {
        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
        KEY idx_sp_pub (is_published, footer_group, sort_order)
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   );
 
   const created = [];

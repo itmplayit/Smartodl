@@ -289,9 +289,19 @@ export const authApi = {
   logout: (payload) => api.post('/auth/logout', payload || {}),
   me: () => api.get('/auth/me'),
   providers: () => api.get('/auth/providers'),
-  forgot: (email) => api.post('/auth/forgot-password', { email }),
+  forgot: (email, extra) => api.post('/auth/forgot-password', { email, ...(extra || {}) }),
   reset: (payload) => api.post('/auth/reset-password', payload),
   changePassword: (payload) => api.post('/auth/change-password', payload),
+};
+
+export const sessionsApi = {
+  list: () => api.get('/auth/sessions'),
+  revoke: (id) => api.delete(`/auth/sessions/${id}`),
+};
+
+export const captchaApi = {
+  config: () => api.get('/captcha/config'),
+  challenge: () => api.get('/captcha/challenge'),
 };
 
 export const userApi = {

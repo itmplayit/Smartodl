@@ -10,6 +10,11 @@ SmartODL is a self-hosted learning platform with courses, quizzes, coding challe
 - MySQL or MariaDB. Local Windows users commonly use XAMPP.
 - A modern browser.
 - A Linux/POSIX host for the local judge in production. Do not expose the Windows judge worker to untrusted users.
+- **bubblewrap** on the judge host, so every submission gets a private filesystem
+  root. The worker refuses to start in production without it.
+
+See [`docs/SECURITY-FIXES-2026-10-31.md`](docs/SECURITY-FIXES-2026-10-31.md) for
+the audited findings, the fixes, and the deployment checklist.
 
 ## Local development
 

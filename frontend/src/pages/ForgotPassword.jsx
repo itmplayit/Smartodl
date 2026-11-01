@@ -2,18 +2,20 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { authApi } from '../services/api';
 import { BrandMark } from '../components/Brand';
+import CaptchaField from '../components/CaptchaField';
 
 export default function ForgotPassword() {
   const [email, setEmail] = useState('');
   const [sent, setSent] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [captcha, setCaptcha] = useState({});
 
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true); setError('');
     try {
-      const { data } = await authApi.forgot(email);
+      const { data } = await authApi.forgot(email, captcha);
       setSent(data.data);
     } catch (err) {
       // Show the backend's actual message so an SMTP failure explains its cause.
@@ -63,6 +65,8 @@ export default function ForgotPassword() {
                 <input className="input" type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
                   autoComplete="email" placeholder="you@college.edu" />
               </label>
+              <CaptchaField onChange={setCaptcha} disabled={busy} />
+
               <button className="btn btn-primary btn-block mt" disabled={busy}>
                 {busy ? 'Sending…' : 'Send reset link'}
               </button>

@@ -162,7 +162,7 @@ async function ensureSchema() {
        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
        KEY idx_pa_user (user_id),
        KEY idx_pa_created (created_at)
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   );
 
   const { ensureFlag } = require('./featureFlags.service');
@@ -190,7 +190,7 @@ async function ensureSchema() {
        meta_key VARCHAR(64) NOT NULL PRIMARY KEY,
        meta_value VARCHAR(255) NOT NULL DEFAULT '',
        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   );
   await recalcIfFormulaChanged();
 }

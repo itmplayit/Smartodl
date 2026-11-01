@@ -37,6 +37,7 @@ const UPGRADES = [
   ['lesson-watch', () => require('./lessonWatch.service').ensureSchema()],
   ['module-quizzes', () => require('./moduleQuiz.service').ensureSchema()],
   ['quiz-supervision', () => require('./quizSupervision.service').ensureSchema()],
+  ['quiz-answers', () => require('./quizAnswers.service').ensureSchema()],
 ];
 
 /**
@@ -72,6 +73,7 @@ const CRITICAL_COLUMNS = [
   ['quiz_attempts', 'ai_timing_score'],
   ['quiz_attempts', 'ai_verdict'],
   ['quiz_attempts', 'ai_trusted'],
+  ['quiz_answers', 'verification_hash'],
   ['quiz_attempts', 'typed_chars'],
   ['quiz_attempts', 'pasted_chars'],
   ['quiz_attempts', 'blocked_pastes'],

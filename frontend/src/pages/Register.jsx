@@ -7,6 +7,7 @@ import { ROLE_HOME } from '../utils/constants';
 import { BrandMark, BrandLogo } from '../components/Brand';
 import { GoogleIcon, GithubIcon } from '../components/OAuthIcons';
 import Icon from '../components/Icon';
+import CaptchaField from '../components/CaptchaField';
 
 const STRENGTH = [
   { label: 'weak', colour: '#ef4444' },
@@ -33,6 +34,7 @@ export default function Register() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [providers, setProviders] = useState(null);
+  const [captcha, setCaptcha] = useState({});
 
   useEffect(() => {
     authApi.providers().then(({ data }) => {
@@ -98,7 +100,7 @@ export default function Register() {
     }
     setBusy(true);
     try {
-      const created = await register(form);
+      const created = await register({ ...form, ...captcha });
       if (created.requires_approval) {
         toast.success('Account created — you will be able to sign in after an administrator approves it.');
         navigate('/login', { replace: true });
@@ -274,6 +276,8 @@ export default function Register() {
                 {' '}and <Link className="link" to="/privacy">privacy policy</Link>
               </span>
             </label>
+
+            <CaptchaField onChange={setCaptcha} disabled={busy} />
 
             <button className="btn btn-primary btn-block mt" disabled={busy}>
               {busy ? 'Creating account…' : 'Create account'}

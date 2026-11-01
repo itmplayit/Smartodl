@@ -12,6 +12,7 @@
  * to the sandboxed judge (Judge0 in production, the local judge worker in dev)
  * through services/judge.service.js.
  */
+const crypto = require('crypto');
 const judge = require('../services/judge.service');
 
 const DEFAULT_LANGUAGES = ['c', 'cpp', 'java', 'python', 'javascript'];
@@ -130,9 +131,40 @@ async function judgeCodingAnswer({ language, sourceCode, cases, timeLimitMs, mem
   };
 }
 
+/**
+ * Binds a completed run to exactly what it proved: the question, the language,
+ * the submitted source, and the CONTENT of every test case.
+ *
+ * Why this exists: `verified = 1` used to be reset only when the student's own
+ * answer changed. Edit a test case's expected output without changing the case
+ * COUNT and the stored verdict still said "passed 3 of 3", so the student was
+ * awarded full marks for code that never passed the corrected case.
+ *
+ * The hash is what ties the stored verdict to the cases that produced it. It is
+ * SHA-256 over a canonical JSON form, so it is stable across runs and cannot be
+ * guessed or crafted by the client.
+ *
+ * @returns {string} 64 hex characters
+ */
+function verificationHash({ questionId, language, source, cases }) {
+  const payload = JSON.stringify({
+    q: String(questionId == null ? '' : questionId),
+    lang: String(language || ''),
+    src: String(source == null ? '' : source),
+    cases: (Array.isArray(cases) ? cases : []).map((t) => [
+      String(t && t.index != null ? t.index : ''),
+      String(t && t.input != null ? t.input : ''),
+      String(t && t.expected_output != null ? t.expected_output : ''),
+      t && t.hidden ? 1 : 0,
+    ]),
+  });
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
 module.exports = {
   DEFAULT_LANGUAGES,
   VERDICT_LABEL,
+  verificationHash,
   parseLanguages,
   parseStarter,
   parseTestCases,

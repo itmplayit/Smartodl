@@ -1747,3 +1747,19 @@ a.link{text-decoration:underline;text-underline-offset:2px;text-decoration-thick
 :root[data-theme="dark"] .table th { color: var(--muted); }
 :root[data-theme="dark"] .landing-date { border-color: var(--border); }
 :root[data-theme="dark"] .landing-date small { color: var(--brand-3); }
+
+/* ---------- CAPTCHA (self-hosted image challenge + hosted widgets) ---------- */
+.captcha-row{display:flex;align-items:center;gap:8px;margin-top:6px}
+.captcha-img{border:1px solid rgba(148,163,184,.5);border-radius:6px;background:#f8fafc;height:56px;width:160px;flex:0 0 auto}
+.captcha-input{flex:1 1 auto;min-width:0;max-width:130px}
+.small.danger{color:#b91c1c}
+:root[data-theme="dark"] .small.danger,
+[data-theme="dark"] .small.danger{color:#fca5a5}
+
+/* ---------- Active devices / sessions list ---------- */
+.session-row{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:10px 0;border-bottom:1px solid rgba(148,163,184,.22)}
+.session-row:last-child{border-bottom:0}
+.session-meta{display:flex;flex-direction:column;gap:2px;min-width:0}
+.session-device{display:flex;align-items:center;gap:6px;font-weight:600}
+.session-device .badge{margin-left:8px}

@@ -28,15 +28,29 @@ const leaderboard = asyncHandler(async (req, res) => {
 
   if (scope === 'course') {
     // course leaderboard is computed live from coding + quiz activity of enrolled students
+    // Two CORRELATED subqueries per row meant the database re-scanned
+    // coding_submissions twice for every enrolled student: a 500-student course
+    // ran ~1000 extra lookups on a page every visitor can open. One aggregate
+    // over the course's own students gives the same numbers in a single pass.
+    // The aggregate is restricted by course_id (not every submission in the
+    // platform) so it stays small as the site grows.
     const rows = await q(
       `SELECT u.id AS user_id, u.full_name, u.avatar, u.college, u.points, u.problems_solved,
-              (SELECT COUNT(*) FROM coding_submissions s WHERE s.user_id = u.id) AS submissions,
-              (SELECT COALESCE(ROUND(100*SUM(s.status='accepted')/NULLIF(COUNT(*),0),2),0) FROM coding_submissions s WHERE s.user_id = u.id) AS accuracy
+              COALESCE(agg.total, 0)    AS submissions,
+              COALESCE(agg.accuracy, 0) AS accuracy
          FROM users u
-         JOIN enrollments e ON e.user_id = u.id
+         JOIN enrollments e ON e.user_id = u.id AND e.course_id = ?
          JOIN roles r ON r.id = u.role_id
-        WHERE e.course_id = ? AND r.slug = 'student'
-        ORDER BY u.points DESC, u.problems_solved DESC LIMIT ?`, [scopeRef, limit],
+         LEFT JOIN (
+           SELECT s.user_id,
+                  COUNT(*) AS total,
+                  ROUND(100 * SUM(s.status = 'accepted') / NULLIF(COUNT(*), 0), 2) AS accuracy
+             FROM coding_submissions s
+             JOIN enrollments e2 ON e2.user_id = s.user_id AND e2.course_id = ?
+            GROUP BY s.user_id
+         ) agg ON agg.user_id = u.id
+        WHERE r.slug = 'student'
+        ORDER BY u.points DESC, u.problems_solved DESC LIMIT ?`, [scopeRef, scopeRef, limit],
     );
     return ok(res, rows.map((r, i) => ({ ...r, rank_position: i + 1, scope: 'course', scope_ref: scopeRef })));
   }
@@ -341,6 +355,9 @@ const updateAntiCheatSettings = asyncHandler(async (req, res) => {
 });
 
 const updateSettings = asyncHandler(async (req, res) => {
+  // The landing page renders several settings (banner, site name, socials), so a
+  // settings change can make the cached landing document stale.
+  await cache.del('landing:public');
   const payload = req.body.settings || req.body;
   if (!payload || typeof payload !== 'object') throw ApiError.badRequest('settings object is required');
   await settingsService.updateSettings(payload, req.user.id);
@@ -527,6 +544,11 @@ const developerDashboard = asyncHandler(async (req, res) => {
 
 /* --------------------------- public platform stats --------------------------- */
 const publicStats = asyncHandler(async (req, res) => {
+  // Nine counting subqueries on the landing page. Counters do not need to be
+  // realtime — 60 seconds of staleness is invisible and removes a heavy query
+  // from every anonymous visit.
+  const cachedRow = await cache.get('stats:public');
+  if (cachedRow) return ok(res, cachedRow);
   const [row] = await q(`
     SELECT
       (SELECT COUNT(*) FROM users u JOIN roles r ON r.id=u.role_id WHERE r.slug='student')  AS total_students,
@@ -539,6 +561,7 @@ const publicStats = asyncHandler(async (req, res) => {
       (SELECT COUNT(*) FROM contests)                          AS total_contests,
       (SELECT COUNT(*) FROM quiz_attempts WHERE status='evaluated') AS total_quiz_attempts
   `);
+  await cache.set('stats:public', row, 60);
   ok(res, row);
 });
 

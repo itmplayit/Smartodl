@@ -482,7 +482,12 @@ const removeTestCase = asyncHandler(async (req, res) => {
 
 /* -------------------------- languages + run -------------------------- */
 const languages = asyncHandler(async (req, res) => {
-  ok(res, await q('SELECT * FROM coding_languages WHERE is_active = 1 ORDER BY id'));
+  // The language table changes only when an admin edits it, but this endpoint is
+  // fetched on every visit to the coding arena. Five minutes of staleness is
+  // invisible; the query on every request was not.
+  const rows = await cache.cached('coding:languages', 300, () =>
+    q('SELECT * FROM coding_languages WHERE is_active = 1 ORDER BY id'));
+  ok(res, rows);
 });
 
 /** POST /api/coding/run — LeetCode-style "Run Code":
@@ -984,6 +989,16 @@ const contestLeaderboard = asyncHandler(async (req, res) => {
     contest = await q1('SELECT * FROM contests WHERE id = ?', [contest.id]);
   }
 
+  // A completed contest's standings can never change again, yet every view
+  // re-ran this query AND re-attempted certificate issuance for the top ten.
+  // Cache the frozen table. Issuance is idempotent (one certificate per
+  // user/type/context, taken under a row lock), so doing it only on a miss is
+  // safe — and the short TTL lets a later view retry if issuance failed here.
+  const frozenKey = `contest:leaderboard:${contest.id}`;
+  if (contest.status === 'completed') {
+    const frozen = await cache.get(frozenKey);
+    if (frozen) return ok(res, frozen);
+  }
   const rows = await q(
     `SELECT cp.id, cp.contest_id, cp.user_id, cp.score, cp.solved_count, cp.penalty_minutes,
             cp.rank_position, cp.last_submission_at, cp.registered_at,
@@ -1003,8 +1018,72 @@ const contestLeaderboard = asyncHandler(async (req, res) => {
       }
     } catch (_) { /* cert issuance failure must not break leaderboard */ }
   }
+  if (contest.status === 'completed' && ranked.length) await cache.set(frozenKey, ranked, 60);
   ok(res, ranked);
 });
+
+/**
+ * Batched writes for contest standings.
+ *
+ * The old code issued one UPDATE per participant and one per problem. A
+ * 500-participant contest therefore ran ~520 round-trips — and recalcContest
+ * runs on every submission during a live contest, so the cost was paid
+ * repeatedly while the contest was at its busiest.
+ *
+ * Chunked so a large contest cannot exceed the packet size or the placeholder
+ * limit of a single statement.
+ */
+const CONTEST_WRITE_CHUNK = 200;
+
+async function upsertContestParticipants(contestId, perUser) {
+  const entries = Object.entries(perUser);
+  for (let i = 0; i < entries.length; i += CONTEST_WRITE_CHUNK) {
+    const chunk = entries.slice(i, i + CONTEST_WRITE_CHUNK);
+    const placeholders = [];
+    const params = [];
+    for (const [userId, aggregate] of chunk) {
+      placeholders.push('(?,?,?,?,?,?)');
+      params.push(contestId, userId, aggregate.score, aggregate.solved.size, aggregate.penalty, aggregate.last);
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await exec(
+      `INSERT INTO contest_participants
+         (contest_id, user_id, score, solved_count, penalty_minutes, last_submission_at)
+       VALUES ${placeholders.join(', ')}
+       ON DUPLICATE KEY UPDATE
+         score = VALUES(score),
+         solved_count = VALUES(solved_count),
+         penalty_minutes = VALUES(penalty_minutes),
+         last_submission_at = VALUES(last_submission_at)`,
+      params,
+    );
+  }
+}
+
+/**
+ * One statement for the per-problem counters.
+ *
+ * A CASE update rather than an upsert: contest_problems rows already exist (the
+ * reset above sets them to 0), and this avoids depending on the NOT NULL
+ * defaults of the other columns in that table.
+ */
+async function updateContestProblemCounts(contestId, perProblemSolved) {
+  const entries = Object.entries(perProblemSolved);
+  if (!entries.length) return;
+  const cases = [];
+  const params = [];
+  for (const [problemId, users] of entries) {
+    cases.push('WHEN ? THEN ?');
+    params.push(problemId, users.size);
+  }
+  params.push(contestId);
+  await exec(
+    `UPDATE contest_problems
+        SET solved_count = CASE problem_id ${cases.join(' ')} ELSE solved_count END
+      WHERE contest_id = ?`,
+    params,
+  );
+}
 
 /** Recompute contest standings from submissions inside the contest window. */
 async function recalcContest(contestId) {
@@ -1055,19 +1134,8 @@ async function recalcContest(contestId) {
     [contestId],
   );
   await exec('UPDATE contest_problems SET solved_count = 0 WHERE contest_id = ?', [contestId]);
-  for (const [userId, aggregate] of Object.entries(perUser)) {
-    await exec(
-      `UPDATE contest_participants SET score = ?, solved_count = ?, penalty_minutes = ?, last_submission_at = ?
-        WHERE contest_id = ? AND user_id = ?`,
-      [aggregate.score, aggregate.solved.size, aggregate.penalty, aggregate.last, contestId, userId],
-    );
-  }
-  for (const [problemId, users] of Object.entries(perProblemSolved)) {
-    await exec(
-      'UPDATE contest_problems SET solved_count = ? WHERE contest_id = ? AND problem_id = ?',
-      [users.size, contestId, problemId],
-    );
-  }
+  await upsertContestParticipants(contestId, perUser);
+  await updateContestProblemCounts(contestId, perProblemSolved);
   await assignRanks({ q, exec }, 'contest_participants',
     'score DESC, solved_count DESC, penalty_minutes ASC', 'contest_id = ?', [contestId]);
   await exec(

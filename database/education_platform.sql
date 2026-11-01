@@ -20,9 +20,9 @@
 -- Current Database: `education_platform`
 --
 
-CREATE DATABASE /*!32312 IF NOT EXISTS*/ `education_platform` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci */;
+CREATE DATABASE /*!32312 IF NOT EXISTS*/ `itm` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci */;
 
-USE `education_platform`;
+USE `itm`;
 
 --
 -- Table structure for table `achievements`
@@ -60,7 +60,7 @@ CREATE TABLE `app_meta` (
   `meta_value` varchar(255) NOT NULL DEFAULT '',
   `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`meta_key`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -118,7 +118,7 @@ CREATE TABLE `certificate_templates` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `slug` (`slug`),
   KEY `idx_ct_type` (`cert_type`,`is_default`,`is_active`)
-) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -906,7 +906,7 @@ CREATE TABLE `point_adjustments` (
   PRIMARY KEY (`id`),
   KEY `idx_pa_user` (`user_id`),
   KEY `idx_pa_created` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -926,7 +926,7 @@ CREATE TABLE `proctor_events` (
   PRIMARY KEY (`id`),
   KEY `idx_proctor_attempt` (`attempt_id`,`occurred_at`),
   CONSTRAINT `fk_proctor_attempt` FOREIGN KEY (`attempt_id`) REFERENCES `quiz_attempts` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -949,7 +949,7 @@ CREATE TABLE `proctor_recording_files` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_proctor_recording_feed` (`session_id`,`feed`),
   CONSTRAINT `fk_proctor_recording_file_session` FOREIGN KEY (`session_id`) REFERENCES `proctor_recording_sessions` (`session_id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -976,7 +976,7 @@ CREATE TABLE `proctor_recording_sessions` (
   KEY `idx_proctor_recording_attempt` (`attempt_id`,`requested_at`),
   KEY `idx_proctor_recording_cleanup` (`status`,`ended_at`,`last_activity_at`),
   CONSTRAINT `fk_proctor_recording_attempt` FOREIGN KEY (`attempt_id`) REFERENCES `quiz_attempts` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -994,6 +994,7 @@ CREATE TABLE `quiz_answers` (
   `language` varchar(24) DEFAULT NULL,
   `tests_passed` int(10) unsigned DEFAULT NULL,
   `tests_total` int(10) unsigned DEFAULT NULL,
+  `verification_hash` char(64) DEFAULT NULL,
   `verified` tinyint(1) NOT NULL DEFAULT 0,
   `is_correct` tinyint(1) NOT NULL DEFAULT 0,
   `marks_awarded` decimal(6,2) NOT NULL DEFAULT 0.00,
@@ -1250,7 +1251,7 @@ CREATE TABLE `site_pages` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `slug` (`slug`),
   KEY `idx_sp_pub` (`is_published`,`footer_group`,`sort_order`)
-) ENGINE=InnoDB AUTO_INCREMENT=9 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=9 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -1353,7 +1354,7 @@ CREATE TABLE `user_anticheat_settings` (
   `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`user_id`),
   CONSTRAINT `fk_uac_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -1518,11 +1519,11 @@ SET @OLD_AUTOCOMMIT=@@AUTOCOMMIT, @@AUTOCOMMIT=0;
 LOCK TABLES `certificate_templates` WRITE;
 /*!40000 ALTER TABLE `certificate_templates` DISABLE KEYS */;
 INSERT INTO `certificate_templates` VALUES
-(1,'gold-course','Gold — Course Completion','course','Certificate of Completion','has successfully completed all modules and lessons of the course','Awarded to','★ VERIFIED','Course Completion','#0f172a','#0b1020','#fbbf24','#fde68a','#f59e0b','#fbbf24','#b45309','#fde68a',1,1,1,NULL,'2026-10-31 07:45:40','2026-10-31 07:45:40'),
-(2,'blue-quiz','Blue — Quiz Excellence','quiz','Certificate of Excellence','by achieving {{score}} in the quiz:','Presented to','✓ EXCELLENCE','Quiz Excellence','#0a1530','#070f22','#60a5fa','#93c5fd','#22d3ee','#60a5fa','#1d4ed8','#bfdbfe',1,1,1,NULL,'2026-10-31 07:45:40','2026-10-31 07:45:40'),
-(3,'red-contest','Crimson — Contest Champion','contest','Certificate of Championship','for outstanding performance in the contest:','Awarded to','♔ CHAMPION','Contest Champion','#1a0b10','#0b0508','#f87171','#fecaca','#fb7185','#f87171','#991b1b','#fecaca',1,1,1,NULL,'2026-10-31 07:45:40','2026-10-31 07:45:40'),
-(4,'green-milestone','Emerald — Coding Milestone','milestone','Coding Milestone','by reaching the milestone {{tier}} on the platform.','Earned by','⟨/⟩ MASTERED','Coding Milestone','#06140f','#040b08','#4ade80','#bbf7d0','#22c55e','#4ade80','#166534','#bbf7d0',1,1,1,NULL,'2026-10-31 07:45:40','2026-10-31 07:45:40'),
-(5,'violet-programme','Violet — Programme Completion','path','Programme Completed','for completing every required course in the programme:','Awarded to','✓ PATH COMPLETE','Programme Completion','#160d2e','#0b1020','#a78bfa','#ddd6fe','#818cf8','#a78bfa','#5b21b6','#ddd6fe',1,1,1,NULL,'2026-10-31 07:45:41','2026-10-31 07:45:41');
+(1,'gold-course','Gold — Course Completion','course','Certificate of Completion','has successfully completed all modules and lessons of the course','Awarded to','★ VERIFIED','Course Completion',NULL,'#0f172a','#0b1020','#fbbf24','#fde68a','#f59e0b','#fbbf24','#b45309','#fde68a',1,1,1,NULL,'2026-10-31 07:45:40','2026-10-31 07:45:40'),
+(2,'blue-quiz','Blue — Quiz Excellence','quiz','Certificate of Excellence','by achieving {{score}} in the quiz:','Presented to','✓ EXCELLENCE','Quiz Excellence',NULL,'#0a1530','#070f22','#60a5fa','#93c5fd','#22d3ee','#60a5fa','#1d4ed8','#bfdbfe',1,1,1,NULL,'2026-10-31 07:45:40','2026-10-31 07:45:40'),
+(3,'red-contest','Crimson — Contest Champion','contest','Certificate of Championship','for outstanding performance in the contest:','Awarded to','♔ CHAMPION','Contest Champion',NULL,'#1a0b10','#0b0508','#f87171','#fecaca','#fb7185','#f87171','#991b1b','#fecaca',1,1,1,NULL,'2026-10-31 07:45:40','2026-10-31 07:45:40'),
+(4,'green-milestone','Emerald — Coding Milestone','milestone','Coding Milestone','by reaching the milestone {{tier}} on the platform.','Earned by','⟨/⟩ MASTERED','Coding Milestone',NULL,'#06140f','#040b08','#4ade80','#bbf7d0','#22c55e','#4ade80','#166534','#bbf7d0',1,1,1,NULL,'2026-10-31 07:45:40','2026-10-31 07:45:40'),
+(5,'violet-programme','Violet — Programme Completion','path','Programme Completed','for completing every required course in the programme:','Awarded to','✓ PATH COMPLETE','Programme Completion',NULL,'#160d2e','#0b1020','#a78bfa','#ddd6fe','#818cf8','#a78bfa','#5b21b6','#ddd6fe',1,1,1,NULL,'2026-10-31 07:45:41','2026-10-31 07:45:41');
 /*!40000 ALTER TABLE `certificate_templates` ENABLE KEYS */;
 UNLOCK TABLES;
 COMMIT;

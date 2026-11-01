@@ -18,7 +18,7 @@ async function ensureSchema() {
          FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE,
        CONSTRAINT fk_notification_reads_user
          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   );
 }
 

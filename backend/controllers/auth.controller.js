@@ -6,6 +6,7 @@ const { q, q1, exec, tx } = require('../config/db');
 const { ApiError, asyncHandler, ok, created, randomToken } = require('../utils/helpers');
 const { clientBase: resolveClientBase } = require('../utils/clientUrl');
 const { signAccess, signRefresh, findUserWithRole, setRefreshCookie, clearRefreshCookie, readRefreshToken } = require('../middleware/auth');
+const { deviceLabel } = require('../utils/deviceLabel');
 const { notify } = require('../services/notification.service');
 const { readBool } = require('../services/settings.service');
 const { sendMail } = require('../services/mail.service');
@@ -289,9 +290,19 @@ const forgotPassword = asyncHandler(async (req, res) => {
     // SMTP is disabled, so this link will never be delivered by email. For development, write it
     // to the server console. Only someone who already has server access can read that console,
     // so this is not an additional disclosure.
+    // Log WHAT is misconfigured — never the token.
+    //
+    // A reset link is a full account-takeover credential. Writing it to the
+    // console used to be justified with "only someone with server access can
+    // read it", but server logs routinely flow to files, journald, Docker log
+    // drivers and centralised aggregators — all of which are readable by far
+    // more people and processes than the database. Anyone with log access could
+    // take over any account, including the owner's, without touching the DB.
     console.warn(
-      `[auth] MAIL_MODE=${process.env.MAIL_MODE || 'disabled'} — the reset email was not sent. `
-      + `Reset link for ${user.email}: ${link}`,
+      `[auth] MAIL_MODE=${process.env.MAIL_MODE || 'disabled'} — a password reset was requested for `
+      + `${user.email} but no mail was sent. Configure SMTP (MAIL_MODE=smtp) so users receive reset `
+      + 'links by email, or set DEV_SHOW_RESET_LINK=true to return the link in the API response '
+      + '(rejected in production). The token itself is deliberately NOT logged.',
     );
 
     // Send the token in the HTTP response ONLY when the operator has explicitly requested it.
@@ -356,4 +367,82 @@ const providers = asyncHandler(async (req, res) => ok(res, {
   developer_registration: await readBool('developer_registration', false),
 }));
 
-module.exports = { register, login, refresh, logout, me, forgotPassword, resetPassword, changePassword, providers };
+
+/**
+ * GET /api/auth/sessions
+ *
+ * Lists the caller's *live* sessions so they can see every device that is
+ * currently signed in and revoke the ones they do not recognise. Until now the
+ * app stored `user_agent` + `ip_address` per session but never surfaced them,
+ * so a stolen-but-valid refresh token was invisible to the user.
+ *
+ * Notes:
+ *  - Expired/revoked rows are purged first; without that the table grows
+ *    forever and the list fills up with sessions the user cannot use.
+ *  - `refresh_token` is read to work out which row is the *current* one, then
+ *    dropped — the token digest is never sent to the client.
+ */
+const mySessions = asyncHandler(async (req, res) => {
+  try {
+    await exec('DELETE FROM user_sessions WHERE revoked = 1 OR expires_at < NOW()');
+  } catch (_err) {
+    /* best-effort housekeeping: never fail the read because of a sweep */
+  }
+
+  const rows = await q(
+    `SELECT id, refresh_token, user_agent, ip_address, created_at, expires_at, refresh_rotated_at
+       FROM user_sessions
+      WHERE user_id = ? AND revoked = 0 AND expires_at > NOW()
+      ORDER BY created_at DESC`,
+    [req.user.id],
+  );
+
+  const token = readRefreshToken(req);
+  const currentDigest = token ? tokenDigest(token) : null;
+
+  ok(res, {
+    sessions: rows.map((r) => ({
+      id: r.id,
+      device: deviceLabel(r.user_agent),
+      ip: r.ip_address,
+      created_at: r.created_at,
+      // Rotation only moves on refresh, so this is the best "last seen" we have.
+      last_used_at: r.refresh_rotated_at || r.created_at,
+      expires_at: r.expires_at,
+      current: !!currentDigest && r.refresh_token === currentDigest,
+    })),
+  });
+});
+
+/**
+ * DELETE /api/auth/sessions/:id
+ *
+ * Revokes exactly one of the caller's sessions. Scoped by `user_id` so a
+ * guessed id can only ever hit the caller's own rows. `logoutAll` already
+ * covers the "nuke everything" case.
+ */
+const revokeSession = asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) throw ApiError.badRequest('Invalid session id');
+
+  const token = readRefreshToken(req);
+  const currentDigest = token ? tokenDigest(token) : null;
+  const currentRows = currentDigest
+    ? await q('SELECT id FROM user_sessions WHERE refresh_token = ? AND user_id = ? AND revoked = 0', [currentDigest, req.user.id])
+    : [];
+  const currentId = currentRows.length ? currentRows[0].id : null;
+
+  const result = await exec(
+    'UPDATE user_sessions SET revoked = 1 WHERE id = ? AND user_id = ? AND revoked = 0',
+    [id, req.user.id],
+  );
+  if (!Number(result && result.affectedRows)) throw ApiError.notFound('Session not found');
+
+  // If the user just killed the session they are sitting on, clear their cookie
+  // too — otherwise the browser keeps presenting a token that no longer works.
+  if (currentId !== null && Number(currentId) === id) clearRefreshCookie(res);
+
+  ok(res, { revoked: true });
+});
+
+module.exports = { register, login, refresh, logout, me, forgotPassword, resetPassword, changePassword, providers, mySessions, revokeSession };

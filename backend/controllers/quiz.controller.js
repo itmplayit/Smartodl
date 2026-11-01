@@ -8,7 +8,7 @@ const events = require('../services/events.service');
 const liveQuiz = require('../services/liveQuiz.service');
 const { recalcUser, awardAchievements } = require('../services/points.service');
 const { touchActivity } = require('../services/gamification.service');
-const { DEFAULT_LANGUAGES, parseLanguages, parseStarter, parseTestCases, codingConfig, judgeCodingAnswer } = require('../utils/quiz-code');
+const { DEFAULT_LANGUAGES, parseLanguages, parseStarter, parseTestCases, codingConfig, judgeCodingAnswer, verificationHash } = require('../utils/quiz-code');
 const { buildQuestionOrder } = require('../utils/quiz-question-order');
 const { buildXlsx } = require('../utils/xlsx');
 const aiDetect = require('../services/aiDetection.service');
@@ -2205,7 +2205,7 @@ async function attemptPayload(attempt, quiz) {
   // Coding questions travel with their compiler configuration, but hidden test cases
   // are reduced to "{ index, hidden: true }" — inputs and expected output never leave the server.
   const safeQuestions = assignment.questions.map((row) => (row.type === 'coding' ? { ...row, ...codingConfig(row) } : row));
-  const answers = await q('SELECT question_id, selected_answer, language, verified, tests_passed, tests_total FROM quiz_answers WHERE attempt_id = ?', [attempt.id]);
+  const answers = await q('SELECT question_id, selected_answer, language, verified, tests_passed, tests_total, verification_hash FROM quiz_answers WHERE attempt_id = ?', [attempt.id]);
   // Students are told to "wait for the host" — name them. Whoever started this
   // live run wins; otherwise the quiz creator.
   const host = await q1('SELECT full_name FROM users WHERE id = ? LIMIT 1', [quiz.live_host_id || quiz.created_by]);
@@ -2320,12 +2320,18 @@ const runAttemptCode = asyncHandler(async (req, res) => {
     memoryLimitKb: question.memory_limit_kb,
   });
 
+  // Store WHAT this run proved, not just that it passed. The hash covers the
+  // question, the language, the submitted source and the content of every test
+  // case, so a later edit to any of them invalidates the verdict instead of
+  // silently keeping it (see the grading and submit gates below).
+  const runHash = verificationHash({ questionId: question.id, language, source: source_code, cases });
   await exec(
-    `INSERT INTO quiz_answers (attempt_id, question_id, selected_answer, language, verified, tests_passed, tests_total)
-     VALUES (?,?,?,?,1,?,?)
+    `INSERT INTO quiz_answers (attempt_id, question_id, selected_answer, language, verified, tests_passed, tests_total, verification_hash)
+     VALUES (?,?,?,?,1,?,?,?)
      ON DUPLICATE KEY UPDATE selected_answer = VALUES(selected_answer), language = VALUES(language),
-       verified = 1, tests_passed = VALUES(tests_passed), tests_total = VALUES(tests_total)`,
-    [attempt.id, question.id, JSON.stringify(String(source_code)), language, verdict.passed, verdict.total],
+       verified = 1, tests_passed = VALUES(tests_passed), tests_total = VALUES(tests_total),
+       verification_hash = VALUES(verification_hash)`,
+    [attempt.id, question.id, JSON.stringify(String(source_code)), language, verdict.passed, verdict.total, runHash],
   );
 
   ok(res, {
@@ -2434,10 +2440,28 @@ async function evaluateAttempt(attemptId) {
         if (!code.trim()) {
           unattempted += 1;
         } else if (!cases.length) {
-          // No test cases configured → the instructor grades it by hand (legacy behaviour).
-          isCorrect = 1; awarded = Number(question.marks); correct += 1;
+          // A coding question with no test cases cannot be machine-graded: the
+          // runner itself refuses to run one ("no test cases yet"), so no
+          // verdict can exist. Awarding full marks here meant ANY non-empty
+          // answer scored 100% on a question the platform cannot check — the
+          // answer is kept for the instructor to mark by hand, and scores 0
+          // until they do.
+          unattempted += 1;
         } else {
-          const ranEveryCase = Number(ans.verified) === 1 && Number(ans.tests_total) === cases.length;
+          // `verified` alone is not enough. It is cleared when the student's own
+          // answer changes, but NOT when the instructor edits a test case, so a
+          // stale "passed 3 of 3" used to survive a corrected expected output.
+          // The hash binds the stored verdict to the cases that produced it.
+          const expectedHash = verificationHash({
+            questionId: question.id,
+            language: ans.language,
+            source: code,
+            cases,
+          });
+          const runMatches = !!ans.verification_hash && ans.verification_hash === expectedHash;
+          const ranEveryCase = Number(ans.verified) === 1
+            && Number(ans.tests_total) === cases.length
+            && runMatches;
           isCorrect = ranEveryCase && Number(ans.tests_passed) === cases.length ? 1 : 0;
           awarded = isCorrect ? Number(question.marks) : 0;
           if (isCorrect) correct += 1; else wrong += 1;
@@ -2540,6 +2564,7 @@ const submitAttempt = asyncHandler(async (req, res) => {
            verified = IF(selected_answer <=> VALUES(selected_answer), verified, 0),
            tests_passed = IF(selected_answer <=> VALUES(selected_answer), tests_passed, NULL),
            tests_total = IF(selected_answer <=> VALUES(selected_answer), tests_total, NULL),
+           verification_hash = IF(selected_answer <=> VALUES(selected_answer), verification_hash, NULL),
            selected_answer = VALUES(selected_answer),
            time_spent_seconds = VALUES(time_spent_seconds)`,
         [attempt.id, questionId, JSON.stringify(a.selected_answer ?? null), a.time_spent_seconds || 0],
@@ -2559,7 +2584,8 @@ const submitAttempt = asyncHandler(async (req, res) => {
   );
   // Gate: a coding answer that was never run against every test case cannot be submitted.
   const codingAnswers = await q(
-    `SELECT qq.id, qq.position, qq.type, qq.test_cases, qq.starter_code, qa.selected_answer, qa.verified, qa.tests_total
+    `SELECT qq.id, qq.position, qq.type, qq.test_cases, qq.starter_code,
+            qa.selected_answer, qa.verified, qa.tests_total, qa.language, qa.verification_hash
        FROM quiz_answers qa JOIN quiz_questions qq ON qq.id = qa.question_id
       WHERE qa.attempt_id = ? AND qq.type = 'coding'`,
     [attempt.id],
@@ -2602,7 +2628,16 @@ const submitAttempt = asyncHandler(async (req, res) => {
     // an untouched starter template is not a solution yet — it must not lock the submit button
     const templates = Object.values(parseStarter(row.starter_code)).map((t) => String(t || '').trim()).filter(Boolean);
     if (templates.includes(code.trim())) return false;
-    return Number(row.verified) !== 1;
+    if (Number(row.verified) !== 1) return true;
+    // Verified is not sufficient on its own: the cases may have been edited
+    // since the run. Require the stored hash to match the cases as they are now.
+    const expected = verificationHash({
+      questionId: row.id,
+      language: row.language,
+      source: code,
+      cases: parseTestCases(row.test_cases),
+    });
+    return !row.verification_hash || row.verification_hash !== expected;
   });
   if (pending.length && !outOfTime) {
     const canonical = await q('SELECT id FROM quiz_questions WHERE quiz_id = ? ORDER BY position, id', [attempt.quiz_id]);
